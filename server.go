@@ -196,7 +196,7 @@ func ListenAndServeTLS(addr, certFile, keyFile string, handler UDSHandler, logge
 	if logger == nil {
 		logger = ioutil.Discard
 	}
-	server.log = log.New(logger, "DoIP: ", log.Llongfile)
+	server.log = log.New(logger, "DoIP Srv: ", log.Llongfile)
 	return server.ListenAndServe()
 }
 
@@ -327,6 +327,7 @@ func (srv *Server) serveTCP(l net.Listener) error {
 			break
 		}
 		//Setup a new context
+		srv.log.Printf("New connection on %s", rw.RemoteAddr().String())
 		wg.Add(1)
 		go srv.serve(&wg, handler, rw.RemoteAddr(), rw) // Should I attach the parameters with context?
 	}
@@ -350,13 +351,16 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 	// new goroutine was created for receiving indication from UpperLayer (f.g UDS)
 	errInd := make(chan error, 1)
 	go func() {
+		defer w.Close()
+		srv.log.Println("Server new goroutine")
 		c := h.NewIndChan(ctx, a)
 		for {
 			select {
 			case m, ok := <-c:
 				// Closed
 				if !ok {
-					srv.log.Printf("Client closed, exiting...")
+					srv.log.Printf("UDS server closed, exiting...")
+					errInd <- errors.New("UDS server closed")
 					break
 				}
 				err := w.WriteMsg(m)
@@ -383,7 +387,6 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 		err error
 	)
 	reader := Reader(&defaultReader{srv})
-	srv.log.Println("Reading on-ling")
 	for {
 		r, id, err := reader.ReadTCP(w.tcp, idleTimeout)
 		if err != nil {
@@ -391,7 +394,7 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 		}
 		m, e := Unpack(r, id)
 		if e != nil { // Send a FormatError back
-			srv.log.Printf("Rcv: error on %v\n", e.Error())
+			srv.log.Printf("rcv error on %v\n", e.Error())
 			continue
 		}
 		h.ServeDoIP(w, m) // Writes back to the client
