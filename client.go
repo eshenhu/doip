@@ -14,7 +14,7 @@ import (
 const (
 	testerPresent = 0x3
 	aliveTimeout  = 1 * time.Second
-	readTimeout   = 2 * time.Second
+	readTimeout   = 5 * time.Second
 	interval      = 100 * time.Millisecond
 )
 
@@ -40,19 +40,25 @@ type doIPMessage struct {
 type doIPError int
 
 const (
+	noError                         doIPError = 0
 	timeout                         doIPError = 1
+	unmatchedSrcAddr                doIPError = 2
 	incorrectPatternFormat          doIPError = 7
 	invalidPayloadLength            doIPError = 8
 	negativeAck                     doIPError = 9
-	routingActivationResponseFailed doIPError = 10
-	sessionDisconnected             doIPError = 11
-	unknownError                    doIPError = 12
+	positiveAck                     doIPError = 10
+	routingActivationResponseFailed doIPError = 11
+	sessionDisconnected             doIPError = 12
+	unknownPayloadType              doIPError = 13
+	unknownError                    doIPError = 14
 )
 
 func (d doIPError) Error() string {
 	switch d {
 	case timeout:
 		return fmt.Sprintf("#%02d <DoIP: Receive timeout>", d)
+	case unmatchedSrcAddr:
+		return fmt.Sprintf("#%02d <DoIP: Unmatched src address>", d)
 	case incorrectPatternFormat:
 		return fmt.Sprintf("#%02d <DoIP: Header incorrect pattern format, close socket>", d)
 	case invalidPayloadLength:
@@ -63,6 +69,8 @@ func (d doIPError) Error() string {
 		return fmt.Sprintf("#%02d <DoIP: Routing activation failed>", d)
 	case sessionDisconnected:
 		return fmt.Sprintf("#%02d <DoIP: Session disconnected>", d)
+	case unknownPayloadType:
+		return fmt.Sprintf("#%02d <DoIP: Unknown payload type>", d)
 	default:
 		return fmt.Sprintf("#%02d <DoIP: Unknown error>", unknownError)
 	}
@@ -92,7 +100,7 @@ func NewDoIP(logger io.Writer, sourceAddress uint16, server string) *DoIP {
 		logger = ioutil.Discard
 	}
 
-	d.log = log.New(logger, "DoIP: ", log.Llongfile)
+	d.log = log.New(logger, "DoIP Client: ", log.Llongfile|log.Lmicroseconds)
 	return d
 }
 
@@ -128,12 +136,13 @@ func (d *DoIP) Connect() (err error) {
 		return
 	}
 
-	go d.aliveCheckPeriodical()
+	//go d.aliveCheckPeriodical()
 	return
 }
 
 // Disconnect : closes the connection to the server
 func (d *DoIP) Disconnect() {
+	d.log.Printf("Disconnect... ")
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	if d.connection == nil {
@@ -154,7 +163,37 @@ func (d *DoIP) Exchange(targetAddr uint16, writeData []byte) (readData []byte, e
 		return nil, err
 	}
 	_, _, readData, err = d.Receive()
-	return
+	return readData, err
+}
+
+//SendMsg Message
+func (d *DoIP) SendMsg(m MsgReq) error {
+	data := m.Pack()
+	ll := len(data)
+
+	var buffer = make([]byte, 8+ll)
+
+	buffer[0] = protocolVersion
+	buffer[1] = inverseProtocolVersion
+	binary.BigEndian.PutUint16(buffer[2:4], (uint16)(m.GetID()))
+
+	switch m.GetID() {
+	case aliveCheckRequest:
+		binary.BigEndian.PutUint32(buffer[4:8], 0)
+	default:
+		binary.BigEndian.PutUint32(buffer[4:8], uint32(ll))
+		copy(buffer[8:], data)
+	}
+
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	if d.connection == nil {
+		d.log.Printf("Attempt to send when not connected")
+		return sessionDisconnected
+	}
+	// TODO: Should we check the number of bytes and try again if less then expected?
+	_, err := d.connection.Write(buffer)
+	return err
 }
 
 // Send : Send only method
@@ -162,7 +201,7 @@ func (d *DoIP) Send(TargetAddress uint16, payloadType MsgTid, data []byte) error
 	var size int
 	switch payloadType {
 	case aliveCheckRequest:
-		size = 4
+		size = 8
 	case routingActivationRequest:
 		size = 10
 	default:
@@ -177,16 +216,17 @@ func (d *DoIP) Send(TargetAddress uint16, payloadType MsgTid, data []byte) error
 
 	switch payloadType {
 	case aliveCheckRequest:
-		binary.BigEndian.PutUint32(buffer[4:8], 0)
 	case routingActivationRequest:
 		binary.BigEndian.PutUint32(buffer[4:8], uint32(len(data))+2)
 		binary.BigEndian.PutUint16(buffer[8:10], uint16(d.source))
 		copy(buffer[10:], data)
-	default:
+	case diagnosticMessage:
 		binary.BigEndian.PutUint32(buffer[4:8], uint32(len(data))+4)
 		binary.BigEndian.PutUint16(buffer[8:10], uint16(d.source))
 		binary.BigEndian.PutUint16(buffer[10:12], uint16(TargetAddress))
 		copy(buffer[12:], data)
+	default:
+		return unknownPayloadType
 	}
 
 	d.mtx.Lock()
@@ -202,6 +242,7 @@ func (d *DoIP) Send(TargetAddress uint16, payloadType MsgTid, data []byte) error
 
 // Receive : get messages received. Set an error if a timeout or an error message has been received
 func (d *DoIP) Receive() (source uint16, target uint16, data []byte, err error) {
+	var ok bool
 	select {
 	case message, ok := <-d.inChan:
 		if ok {
@@ -213,7 +254,10 @@ func (d *DoIP) Receive() (source uint16, target uint16, data []byte, err error) 
 		err = sessionDisconnected
 		d.log.Printf("%v", err)
 
-	case err, _ = <-d.errChan:
+	case err, ok = <-d.errChan:
+		if !ok {
+			err = sessionDisconnected
+		}
 		d.log.Printf("%v", err)
 
 	case <-time.After(d.readTimeout):
@@ -227,8 +271,8 @@ func (d *DoIP) Receive() (source uint16, target uint16, data []byte, err error) 
 // to indicate that the client is still connected and that the diagnostic services are to remain active
 // 7.1.7
 func (d *DoIP) aliveCheckPeriodical() {
-	d.log.Printf("Starting tester present routine")
-	defer d.log.Printf("Stopping tester present routine")
+	d.log.Printf("Starting alive routine (%s)\n", d.connection.LocalAddr().String())
+	defer d.log.Printf("Stopping alive routine (%s)\n", d.connection.LocalAddr().String())
 	for {
 		select {
 		case <-time.After(aliveTimeout):
@@ -237,6 +281,7 @@ func (d *DoIP) aliveCheckPeriodical() {
 				d.log.Printf("TesterPresent send error %s", err)
 			}
 		case <-d.running:
+			d.log.Printf("Stop alive routine as closed(%s)\n", d.connection.LocalAddr().String())
 			return
 		}
 	}
@@ -277,7 +322,6 @@ func (d *DoIP) inputLoop(connection net.Conn) {
 	defer close(d.inChan)
 	defer close(d.errChan)
 
-	d.log.Println("Go to inputLoop")
 	var header [8]byte
 	for {
 		// First receive and decode the header
@@ -311,10 +355,15 @@ func (d *DoIP) inputLoop(connection net.Conn) {
 		sourceAddress, targetAddress := parseAddresses(payloadType, payload)
 
 		switch {
-		case targetAddress != uint16(d.source):
-			d.log.Printf("DoIP: Unknown target address %v - drop message", targetAddress)
-
 		case payloadType == aliveCheckResponse:
+			//Todo: Tracking on the activity of the client, terminate connection if Timeout
+		case payloadType == genericHeaderNegativeAcknowledge:
+			d.log.Println("DoIP: NACK - drop message")
+			d.errChan <- unknownPayloadType
+
+		case targetAddress != uint16(d.source):
+			d.log.Printf("DoIP: Unknown target address %v - drop message %v", targetAddress, payloadType)
+			d.errChan <- unmatchedSrcAddr
 
 		case payloadType == routingActivationResponse && dataSize != uint32(len(payload)):
 			d.errChan <- invalidPayloadLength
@@ -324,7 +373,11 @@ func (d *DoIP) inputLoop(connection net.Conn) {
 
 		case payloadType == diagnosticMessagePositiveAcknowledge:
 			// This type carries tester present response and other messages that can be discarded
-			d.log.Printf("DoIP: Received diagnosticMessagePositiveAcknowledge - drop message")
+			d.inChan <- &doIPMessage{
+				source: sourceAddress,
+				target: targetAddress,
+				data:   payload[5:],
+			}
 
 		case payloadType == diagnosticMessage || payloadType == routingActivationResponse:
 			d.inChan <- &doIPMessage{
@@ -334,6 +387,7 @@ func (d *DoIP) inputLoop(connection net.Conn) {
 			}
 		default:
 			d.log.Printf("DoIP: Unknown payload type - drop message")
+			d.errChan <- unknownPayloadType
 		}
 	}
 }
@@ -343,9 +397,18 @@ func parseAddresses(payloadType MsgTid, payload []byte) (sourceAddress uint16, t
 	case routingActivationResponse:
 		targetAddress = binary.BigEndian.Uint16(payload[0:2])
 		sourceAddress = binary.BigEndian.Uint16(payload[2:4])
-	default:
+
+	case genericHeaderNegativeAcknowledge:
+
+	case diagnosticMessage:
+		fallthrough
+	case diagnosticMessagePositiveAcknowledge:
+		fallthrough
+	case diagnosticMessageNegativeAcknowledge:
 		sourceAddress = binary.BigEndian.Uint16(payload[0:2])
 		targetAddress = binary.BigEndian.Uint16(payload[2:4])
+	case aliveCheckResponse:
+		targetAddress = binary.BigEndian.Uint16(payload[0:2])
 	}
 	return
 }

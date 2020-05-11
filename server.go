@@ -15,14 +15,15 @@ import (
 )
 
 const (
-	doIPTimeout    = 2 * time.Second
-	tcpIdleTimeout = 8 * time.Second
+	doIPTimeout    = 5 * time.Second
+	tcpIdleTimeout = 15 * time.Second
 	maxMsgSize     = ^uint32(0)
 )
 
 var (
 	errMsgTooShort         = errors.New("Message too short")
 	errMsgProtocolMismatch = errors.New("Message protocol mismatch")
+	errMsgSecurity         = errors.New("RoutingActivation Failed")
 )
 
 // UDSHandler is implemented by any value that implements Handler and NewIndChan()
@@ -153,6 +154,17 @@ func (dr *defaultReader) ReadTCP(conn net.Conn, timeout time.Duration) ([]byte, 
 	return dr.readTCP(conn, timeout)
 }
 
+type defaultWriter struct {
+	s *Server
+	w ResponseWriter
+	c *net.Conn
+}
+
+func (dw *defaultWriter) Write(p []byte) (n int, err error) {
+	dw.s.InterceptWrite(dw.c, p)
+	return dw.w.Write(p)
+}
+
 // ServeDoIP calls f(w, r).
 func (f HandlerFunc) ServeDoIP(w ResponseWriter, r Msg) {
 	f(w, r)
@@ -170,7 +182,7 @@ func ListenAndServe(addr string, network string, handler UDSHandler, logger io.W
 	if logger == nil {
 		logger = ioutil.Discard
 	}
-	server.log = log.New(logger, "DoIP: ", log.Llongfile)
+	server.log = log.New(logger, "DoIP: ", log.Llongfile|log.Lmicroseconds)
 	return server.ListenAndServe()
 }
 
@@ -196,7 +208,7 @@ func ListenAndServeTLS(addr, certFile, keyFile string, handler UDSHandler, logge
 	if logger == nil {
 		logger = ioutil.Discard
 	}
-	server.log = log.New(logger, "DoIP: ", log.Llongfile)
+	server.log = log.New(logger, "DoIP Srv: ", log.Llongfile|log.Lmicroseconds)
 	return server.ListenAndServe()
 }
 
@@ -212,6 +224,9 @@ type Server struct {
 	TLSConfig *tls.Config
 	// Handler to invoke, DoIP.DefaultServeMux if nil.
 	Handler UDSHandler
+	// Intercept method for validation.Only after getting RoutingActiveAck, then handle the next.
+	InterceptRead  func(*net.Conn, Msg) error
+	InterceptWrite func(*net.Conn, []byte)
 	// The net.Conn.SetReadTimeout value for new connections, defaults to 2 * time.Second.
 	ReadTimeout time.Duration
 	// The net.Conn.SetWriteTimeout value for new connections, defaults to 2 * time.Second.
@@ -223,9 +238,15 @@ type Server struct {
 	// Shutdown handling
 	lock sync.RWMutex
 	// Tracking on the living connections
-	activeConn map[*net.Conn]struct{}
+	activeConn map[*net.Conn]userInfo
 	// Logging
 	log *log.Logger
+}
+
+// see the Table 39 for the definition of Logical Address
+// 0 : reserved by ISO , here we use as an invalid value
+type userInfo struct {
+	address uint16
 }
 
 // ListenAndServe starts a nameserver on the configured address in *Server.
@@ -235,6 +256,44 @@ func (srv *Server) ListenAndServe() error {
 	addr := srv.Addr
 	if addr == "" {
 		addr = ":domain"
+	}
+
+	if srv.InterceptRead == nil {
+		srv.InterceptRead = func(c *net.Conn, m Msg) error {
+			switch m.GetID() {
+			case routingActivationRequest, aliveCheckRequest:
+				return nil
+			default:
+				srv.lock.Lock()
+				v, ok := srv.activeConn[c]
+				srv.lock.Unlock()
+				if ok && v.address != 0 {
+					return nil
+				}
+				return errMsgSecurity
+			}
+		}
+	}
+
+	if srv.InterceptWrite == nil {
+		// Associate Logical Address of External tools with socket for checking
+		// the SrcAddress is right or not.
+		// []byte : 0    1    2    3
+		//        :rev ~rev  payloadType
+		srv.InterceptWrite = func(c *net.Conn, b []byte) {
+			t := (MsgTid)(binary.BigEndian.Uint16(b[2:4]))
+			//srv.log.Printf("InterceptWrite %v", t)
+			switch t {
+			case routingActivationResponse:
+				var externalAddr uint16
+				// b[12] is the AckCode, 0 : ACK others: NACK
+				if b[12] == routingSuccessfullyActivated {
+					externalAddr = binary.BigEndian.Uint16(b[8:10])
+				}
+				srv.updateConn(c, userInfo{address: externalAddr})
+			default:
+			}
+		}
 	}
 
 	switch srv.Net {
@@ -327,6 +386,7 @@ func (srv *Server) serveTCP(l net.Listener) error {
 			break
 		}
 		//Setup a new context
+		srv.log.Printf("New connection on %s", rw.RemoteAddr().String())
 		wg.Add(1)
 		go srv.serve(&wg, handler, rw.RemoteAddr(), rw) // Should I attach the parameters with context?
 	}
@@ -346,25 +406,37 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &response{tcp: t, remoteAddr: a}
-	w.writer = w
+	wr := &defaultWriter{s: srv, w: w, c: &t}
+	w.writer = wr
 	// new goroutine was created for receiving indication from UpperLayer (f.g UDS)
 	errInd := make(chan error, 1)
 	go func() {
+		srv.log.Printf("Server new goroutine (%s)\n", w.RemoteAddr().String())
 		c := h.NewIndChan(ctx, a)
+		if c == nil {
+			return
+		}
+	LL:
 		for {
 			select {
-			case m := <-c:
+			case m, ok := <-c:
+				// Closed
+				if !ok {
+					srv.log.Printf("UDS IndChan closed (%s), exiting...", w.RemoteAddr().String())
+					errInd <- errors.New("UDS IndChan closed")
+					break LL
+				}
 				err := w.WriteMsg(m)
 				if err != nil {
 					cancel()
 					<-c //wait to return for the server side to clean the resource
 					errInd <- err
-					break
+					break LL
 				}
 			case <-ctx.Done():
 				<-c //wait to return
 				errInd <- ctx.Err()
-				break
+				break LL
 			}
 		}
 	}()
@@ -378,15 +450,21 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 		err error
 	)
 	reader := Reader(&defaultReader{srv})
-	srv.log.Println("Reading on-ling")
 	for {
 		r, id, err := reader.ReadTCP(w.tcp, idleTimeout)
 		if err != nil {
+			srv.log.Printf("rcv error on ReadTcp %v\n", err.Error())
 			goto Exit
 		}
 		m, e := Unpack(r, id)
 		if e != nil { // Send a FormatError back
-			srv.log.Printf("Rcv: error on %v\n", e.Error())
+			srv.log.Printf("rcv error on %v\n", e.Error())
+			continue
+		}
+		// Security Check
+		if srv.InterceptRead(&t, m) != nil {
+			srv.log.Printf("InterceptRead err")
+			failedHandler(w, DoIPHdrErrSecurity)
 			continue
 		}
 		h.ServeDoIP(w, m) // Writes back to the client
@@ -412,7 +490,8 @@ Exit:
 }
 
 func (srv *Server) readTCP(conn net.Conn, timeout time.Duration) ([]byte, MsgTid, error) {
-	conn.SetReadDeadline(time.Now().Add(timeout))
+	//conn.SetReadDeadline(time.Now().Add(timeout))
+	conn.SetReadDeadline(time.Time{})
 	l := make([]byte, 8)
 	n, err := conn.Read(l)
 	if err != nil || n != 8 {
@@ -428,8 +507,9 @@ func (srv *Server) readTCP(conn net.Conn, timeout time.Duration) ([]byte, MsgTid
 
 	p := (MsgTid)(binary.BigEndian.Uint16(l[2:4]))
 	dataSize := binary.BigEndian.Uint32(l[4:8])
+
 	if dataSize == 0 {
-		return nil, 0, errMsgTooShort
+		return []byte{}, p, nil
 	}
 
 	m := make([]byte, dataSize)
@@ -456,6 +536,8 @@ func (srv *Server) readTCP(conn net.Conn, timeout time.Duration) ([]byte, MsgTid
 
 // closeConnects
 func (srv *Server) closeConnects() {
+	srv.lock.Lock()
+	defer srv.lock.Unlock()
 	for c := range srv.activeConn {
 		(*c).(*net.TCPConn).Close()
 		delete(srv.activeConn, c)
@@ -466,13 +548,20 @@ func (srv *Server) trackConn(c *net.Conn, add bool) {
 	srv.lock.Lock()
 	defer srv.lock.Unlock()
 	if srv.activeConn == nil {
-		srv.activeConn = make(map[*net.Conn]struct{})
+		srv.activeConn = make(map[*net.Conn]userInfo)
 	}
 	if add {
-		srv.activeConn[c] = struct{}{}
+		srv.activeConn[c] = userInfo{address: 0}
 	} else {
 		delete(srv.activeConn, c)
 	}
+}
+
+func (srv *Server) updateConn(c *net.Conn, t userInfo) {
+	srv.lock.Lock()
+	defer srv.lock.Unlock()
+	//srv.log.Printf("updateConn %v", t.address)
+	srv.activeConn[c] = t
 }
 
 // WriteMsg implements the ResponseWriter.WriteMsg method.
@@ -485,7 +574,7 @@ func (w *response) WriteMsg(m Msg) (err error) {
 	if err != nil {
 		return err
 	}
-	_, err = w.Write(b)
+	_, err = w.writer.Write(b)
 	return err
 }
 

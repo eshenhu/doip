@@ -12,6 +12,7 @@ const (
 	DoIPHdrErrMsgTooLarge        byte = 2
 	DoIPHdrErrOutOfMemory        byte = 3
 	DoIPHdrErrInvalidLen         byte = 4
+	DoIPHdrErrSecurity           byte = 10
 )
 
 // Errors
@@ -94,6 +95,12 @@ type Msg interface {
 	GetID() MsgTid
 }
 
+// MsgReq represent ReqMsg
+type MsgReq interface {
+	Msg
+	Pack() []byte
+}
+
 // MsgNACKReq : NACK message
 type MsgNACKReq struct {
 	id      MsgTid
@@ -102,6 +109,11 @@ type MsgNACKReq struct {
 
 // GetID returns id
 func (r *MsgNACKReq) GetID() MsgTid { return r.id }
+
+//Pack message
+func (r *MsgNACKReq) Pack() []byte {
+	return []byte{r.errCode}
+}
 
 // MsgActivationReq :
 type MsgActivationReq struct {
@@ -114,6 +126,24 @@ type MsgActivationReq struct {
 
 // GetID returns id
 func (r *MsgActivationReq) GetID() MsgTid { return r.id }
+
+//Pack message
+func (r *MsgActivationReq) Pack() []byte {
+	ln := 2 + 1 + 4
+	if len(r.reserveForOEM) == 4 {
+		ln += 4
+	}
+
+	buf := make([]byte, ln)
+	binary.BigEndian.PutUint16(buf[:2], uint16(r.srcAddress))
+	buf[2] = r.activationType
+	copy(buf[3:], r.reserveForStd)
+
+	if len(r.reserveForOEM) == 4 {
+		copy(buf[7:], r.reserveForOEM)
+	}
+	return buf
+}
 
 // MsgActivationRes Res
 type MsgActivationRes struct {
@@ -136,9 +166,15 @@ type MsgAliveChkReq struct {
 //GetID returns id
 func (r *MsgAliveChkReq) GetID() MsgTid { return r.id }
 
+//Pack message
+func (r *MsgAliveChkReq) Pack() []byte {
+	return []byte{}
+}
+
 //MsgAliveChkRes AliveCheck
 type MsgAliveChkRes struct {
-	id MsgTid
+	id         MsgTid
+	srcAddress uint16
 }
 
 //GetID returns id
@@ -154,6 +190,18 @@ type MsgDiagMsgReq struct {
 
 //GetID returns id
 func (r *MsgDiagMsgReq) GetID() MsgTid { return r.id }
+
+//Pack message
+func (r *MsgDiagMsgReq) Pack() []byte {
+	ln := 4 + len(r.userdata)
+	buf := make([]byte, ln)
+
+	binary.BigEndian.PutUint16(buf[0:2], uint16(r.srcAddress))
+	binary.BigEndian.PutUint16(buf[2:4], uint16(r.dstAddress))
+	copy(buf[4:], r.userdata)
+
+	return buf
+}
 
 //MsgDiagMsgRes DiagMsg
 type MsgDiagMsgRes struct {
@@ -171,7 +219,19 @@ func (w *MsgDiagMsgRes) GetID() MsgTid { return w.id }
 type MsgDiagMsgInd MsgDiagMsgReq
 
 // GetID returns id
-func (w *MsgDiagMsgInd) GetID() MsgTid { return w.id }
+func (r *MsgDiagMsgInd) GetID() MsgTid { return r.id }
+
+//Pack message
+func (r *MsgDiagMsgInd) Pack() []byte {
+	ln := 4 + len(r.userdata)
+	buf := make([]byte, ln)
+
+	binary.BigEndian.PutUint16(buf[0:2], uint16(r.srcAddress))
+	binary.BigEndian.PutUint16(buf[2:4], uint16(r.dstAddress))
+	copy(buf[4:], r.userdata)
+
+	return buf
+}
 
 func packResNAK(m Msg) ([]byte, error) {
 	r, ok := m.(*MsgNACKReq)
@@ -229,7 +289,7 @@ func unpackReqAC(b []byte) (w Msg, err error) {
 }
 
 func packResAC(m Msg) ([]byte, error) {
-	return nil, nil
+	return []byte{0, 0}, nil
 }
 
 func unpackReqDM(b []byte) (w Msg, err error) {
