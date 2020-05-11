@@ -109,10 +109,11 @@ type UDSMsg struct {
 
 // Simple doiptest, only dedicated service for only one user
 type doiptest struct {
-	mux     sync.RWMutex
-	inChan  chan *UDSMsg
-	outChan chan *MsgDiagMsgInd
-	log     *log.Logger
+	mux            sync.RWMutex
+	inChan         chan *UDSMsg
+	outChan        chan *MsgDiagMsgInd
+	ctxTrackClient context.Context
+	log            *log.Logger
 }
 
 func NewDoIPTest() *doiptest {
@@ -133,6 +134,7 @@ func (srv *doiptest) start() {
 func (srv *doiptest) close() {
 	log.Printf("Stop DoIPTest")
 	close(srv.inChan)
+	close(srv.outChan)
 }
 
 func (srv *doiptest) process() {
@@ -148,6 +150,16 @@ func (srv *doiptest) process() {
 }
 
 func (srv *doiptest) genOutChan(ctx context.Context, a net.Addr) <-chan *MsgDiagMsgInd {
+	srv.ctxTrackClient = ctx
+	go func() {
+		for {
+			select {
+			case <-srv.ctxTrackClient.Done():
+				srv.outChan <- nil
+				break
+			}
+		}
+	}()
 	return srv.outChan
 }
 

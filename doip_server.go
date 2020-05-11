@@ -353,7 +353,12 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 		c := h.NewIndChan(ctx, a)
 		for {
 			select {
-			case m := <-c:
+			case m, ok := <-c:
+				// Closed
+				if !ok {
+					srv.log.Printf("Client closed, exiting...")
+					break
+				}
 				err := w.WriteMsg(m)
 				if err != nil {
 					cancel()
