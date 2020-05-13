@@ -37,17 +37,28 @@ func TestDisconnectScenarios(t *testing.T) {
 	defer srv.Shutdown()
 	time.Sleep(1000 * time.Millisecond)
 
-	t.Run("terminateFromDiagMaster", testTerminateFromDiagMaster)
+	t.Run("terminateFromDiagMaster", testNormalRAReq)
 	//t.Run("terminateFromDiagMasterJustBeforeSend", testTerminateFromDiagMasterJustBeforedoIPSend)
 }
 
-func testTerminateFromDiagMaster(t *testing.T) {
+func testNormalRAReq(t *testing.T) {
 	doIP := NewDoIP(os.Stdout, 0x0E80, "127.0.0.1:13400")
+	defer doIP.Disconnect()
+
 	doIP.SetReadTimeout(200 * time.Millisecond)
 	doIP.Connect()
 
-	//err := doIP.Send(addr, []byte{0x22, 0x10, 0x10, 0x55, 0x33})
-	err := doIP.Send(0x1D01, routingActivationRequest, []byte{0, 0, 0, 0, 0})
+	//err := doIP.Send(0x1D01, routingActivationRequest, []byte{0, 0, 0, 0, 0})
+	req := &MsgActivationReq{
+		id:             routingActivationRequest,
+		srcAddress:     0x0E80,
+		activationType: 0,
+		reserveForStd:  []byte{0, 0, 0, 0},
+		reserveForOEM:  []byte{},
+	}
+
+	err := doIP.SendMsg(req)
+	// doIP.Send
 	assert.NoError(t, err)
 
 	_, _, _, err = doIP.Receive()
