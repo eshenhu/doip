@@ -359,8 +359,8 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 			case m, ok := <-c:
 				// Closed
 				if !ok {
-					srv.log.Printf("UDS server closed, exiting...")
-					errInd <- errors.New("UDS server closed")
+					srv.log.Printf("UDS IndChan closed, exiting...")
+					errInd <- errors.New("UDS IndChan closed")
 					break
 				}
 				err := w.WriteMsg(m)

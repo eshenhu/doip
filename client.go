@@ -177,7 +177,6 @@ func (d *DoIP) Send(TargetAddress uint16, payloadType MsgTid, data []byte) error
 
 	switch payloadType {
 	case aliveCheckRequest:
-		binary.BigEndian.PutUint32(buffer[4:8], 0)
 	case routingActivationRequest:
 		binary.BigEndian.PutUint32(buffer[4:8], uint32(len(data))+2)
 		binary.BigEndian.PutUint16(buffer[8:10], uint16(d.source))

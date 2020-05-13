@@ -91,7 +91,7 @@ func (srv *doiptest) genOutChan(ctx context.Context, a net.Addr) <-chan *MsgDiag
 		select {
 		case <-srv.ctxTrackClient.Done():
 			srv.log.Printf("Ctx rcv cancel event, exit...\n")
-			srv.outChan <- nil
+			close(srv.outChan)
 			break
 		}
 	}()
