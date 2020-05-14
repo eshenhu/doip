@@ -92,7 +92,7 @@ func NewDoIP(logger io.Writer, sourceAddress uint16, server string) *DoIP {
 		logger = ioutil.Discard
 	}
 
-	d.log = log.New(logger, "DoIP: ", log.Llongfile)
+	d.log = log.New(logger, "DoIP Client: ", log.Llongfile)
 	return d
 }
 
@@ -155,6 +155,36 @@ func (d *DoIP) Exchange(targetAddr uint16, writeData []byte) (readData []byte, e
 	}
 	_, _, readData, err = d.Receive()
 	return
+}
+
+//SendMsg Message
+func (d *DoIP) SendMsg(m MsgReq) error {
+	data := m.Pack()
+	ll := len(data)
+
+	var buffer = make([]byte, 8+ll)
+
+	buffer[0] = protocolVersion
+	buffer[1] = inverseProtocolVersion
+	binary.BigEndian.PutUint16(buffer[2:4], (uint16)(m.GetID()))
+
+	switch m.GetID() {
+	case aliveCheckRequest:
+		binary.BigEndian.PutUint32(buffer[4:8], 0)
+	default:
+		binary.BigEndian.PutUint32(buffer[4:8], uint32(ll))
+		copy(buffer[8:], data)
+	}
+
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	if d.connection == nil {
+		d.log.Printf("Attempt to send when not connected")
+		return sessionDisconnected
+	}
+	// TODO: Should we check the number of bytes and try again if less then expected?
+	_, err := d.connection.Write(buffer)
+	return err
 }
 
 // Send : Send only method
