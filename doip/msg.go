@@ -46,18 +46,18 @@ var (
 // mhs returns the map
 var (
 	mhUnpack = map[MsgTid]func([]byte) (Msg, error){
-		routingActivationRequest: unpackReqRA,
-		aliveCheckRequest:        unpackReqAC,
-		diagnosticMessage:        unpackReqDM,
+		RoutingActivationRequest: unpackReqRA,
+		AliveCheckRequest:        unpackReqAC,
+		DiagnosticMessage:        unpackReqDM,
 	}
 
 	mhPack = map[MsgTid]func(Msg) ([]byte, error){
-		genericHeaderNegativeAcknowledge:     packResNAK,
-		routingActivationResponse:            packResRA,
-		aliveCheckResponse:                   packResAC,
-		diagnosticMessagePositiveAcknowledge: packResDM,
-		diagnosticMessageNegativeAcknowledge: packResDM,
-		diagnosticMessage:                    packResInd, // Indication from Service Provider
+		GenericHeaderNegativeAcknowledge:     packResNAK,
+		RoutingActivationResponse:            packResRA,
+		AliveCheckResponse:                   packResAC,
+		DiagnosticMessagePositiveAcknowledge: packResDM,
+		DiagnosticMessageNegativeAcknowledge: packResDM,
+		DiagnosticMessage:                    packResInd, // Indication from Service Provider
 	}
 )
 
@@ -117,46 +117,46 @@ func (r *MsgNACKReq) Pack() []byte {
 
 // MsgActivationReq :
 type MsgActivationReq struct {
-	id             MsgTid
-	srcAddress     uint16
-	activationType byte
-	reserveForStd  []byte
-	reserveForOEM  []byte
+	Id             MsgTid
+	SrcAddress     uint16
+	ActivationType byte
+	ReserveForStd  []byte
+	ReserveForOEM  []byte
 }
 
 // GetID returns id
-func (r *MsgActivationReq) GetID() MsgTid { return r.id }
+func (r *MsgActivationReq) GetID() MsgTid { return r.Id }
 
 //Pack message
 func (r *MsgActivationReq) Pack() []byte {
 	ln := 2 + 1 + 4
-	if len(r.reserveForOEM) == 4 {
+	if len(r.ReserveForOEM) == 4 {
 		ln += 4
 	}
 
 	buf := make([]byte, ln)
-	binary.BigEndian.PutUint16(buf[:2], uint16(r.srcAddress))
-	buf[2] = r.activationType
-	copy(buf[3:], r.reserveForStd)
+	binary.BigEndian.PutUint16(buf[:2], uint16(r.SrcAddress))
+	buf[2] = r.ActivationType
+	copy(buf[3:], r.ReserveForStd)
 
-	if len(r.reserveForOEM) == 4 {
-		copy(buf[7:], r.reserveForOEM)
+	if len(r.ReserveForOEM) == 4 {
+		copy(buf[7:], r.ReserveForOEM)
 	}
 	return buf
 }
 
 // MsgActivationRes Res
 type MsgActivationRes struct {
-	id            MsgTid
-	srcAddress    uint16
-	dstAddress    uint16
-	code          byte
-	reserveForStd []byte
-	reserveForOEM []byte
+	Id            MsgTid
+	SrcAddress    uint16
+	DstAddress    uint16
+	Code          byte
+	ReserveForStd []byte
+	ReserveForOEM []byte
 }
 
 //GetID returns id
-func (w *MsgActivationRes) GetID() MsgTid { return w.id }
+func (w *MsgActivationRes) GetID() MsgTid { return w.Id }
 
 // MsgAliveChkReq AliveCheck
 type MsgAliveChkReq struct {
@@ -182,53 +182,58 @@ func (w *MsgAliveChkRes) GetID() MsgTid { return w.id }
 
 //MsgDiagMsgReq DiagMsg
 type MsgDiagMsgReq struct {
-	id         MsgTid
-	srcAddress uint16
-	dstAddress uint16
-	userdata   []byte
+	Id         MsgTid
+	SrcAddress uint16
+	DstAddress uint16
+	Userdata   []byte
 }
 
 //GetID returns id
-func (r *MsgDiagMsgReq) GetID() MsgTid { return r.id }
+func (r *MsgDiagMsgReq) GetID() MsgTid { return r.Id }
 
 //Pack message
 func (r *MsgDiagMsgReq) Pack() []byte {
-	ln := 4 + len(r.userdata)
+	ln := 4 + len(r.Userdata)
 	buf := make([]byte, ln)
 
-	binary.BigEndian.PutUint16(buf[0:2], uint16(r.srcAddress))
-	binary.BigEndian.PutUint16(buf[2:4], uint16(r.dstAddress))
-	copy(buf[4:], r.userdata)
+	binary.BigEndian.PutUint16(buf[0:2], uint16(r.SrcAddress))
+	binary.BigEndian.PutUint16(buf[2:4], uint16(r.DstAddress))
+	copy(buf[4:], r.Userdata)
 
 	return buf
 }
 
 //MsgDiagMsgRes DiagMsg
 type MsgDiagMsgRes struct {
-	id         MsgTid
-	srcAddress uint16
-	dstAddress uint16
-	ackCode    byte // 0: Ack 1..0xFF NAck
-	userdata   []byte
+	Id         MsgTid
+	SrcAddress uint16
+	DstAddress uint16
+	AckCode    byte // 0: Ack 1..0xFF NAck
+	Userdata   []byte
 }
 
 // GetID returns id
-func (w *MsgDiagMsgRes) GetID() MsgTid { return w.id }
+func (w *MsgDiagMsgRes) GetID() MsgTid { return w.Id }
 
 // MsgDiagMsgInd which send from UDS layer
-type MsgDiagMsgInd MsgDiagMsgReq
+type MsgDiagMsgInd struct {
+	Id         MsgTid
+	SrcAddress uint16
+	DstAddress uint16
+	Userdata   []byte
+}
 
 // GetID returns id
-func (r *MsgDiagMsgInd) GetID() MsgTid { return r.id }
+func (r *MsgDiagMsgInd) GetID() MsgTid { return r.Id }
 
 //Pack message
 func (r *MsgDiagMsgInd) Pack() []byte {
-	ln := 4 + len(r.userdata)
+	ln := 4 + len(r.Userdata)
 	buf := make([]byte, ln)
 
-	binary.BigEndian.PutUint16(buf[0:2], uint16(r.srcAddress))
-	binary.BigEndian.PutUint16(buf[2:4], uint16(r.dstAddress))
-	copy(buf[4:], r.userdata)
+	binary.BigEndian.PutUint16(buf[0:2], uint16(r.SrcAddress))
+	binary.BigEndian.PutUint16(buf[2:4], uint16(r.DstAddress))
+	copy(buf[4:], r.Userdata)
 
 	return buf
 }
@@ -248,13 +253,13 @@ func unpackReqRA(b []byte) (w Msg, err error) {
 		return nil, ErrUnpackTooShort
 	}
 	m := &MsgActivationReq{
-		id:             routingActivationRequest,
-		srcAddress:     binary.BigEndian.Uint16(b[0:2]),
-		activationType: b[2],
-		reserveForStd:  b[3:7],
+		Id:             RoutingActivationRequest,
+		SrcAddress:     binary.BigEndian.Uint16(b[0:2]),
+		ActivationType: b[2],
+		ReserveForStd:  b[3:7],
 	}
 	if ll == 11 {
-		m.reserveForOEM = b[7:11]
+		m.ReserveForOEM = b[7:11]
 	}
 	return m, nil
 }
@@ -265,25 +270,25 @@ func packResRA(m Msg) ([]byte, error) {
 		return nil, ErrPackNil
 	}
 	len := 9
-	if r.reserveForOEM != nil {
+	if r.ReserveForOEM != nil {
 		len += 4
 	}
 
 	w := make([]byte, len)
-	binary.BigEndian.PutUint16(w[0:2], r.srcAddress)
-	binary.BigEndian.PutUint16(w[2:4], r.dstAddress)
-	w[4] = r.code
+	binary.BigEndian.PutUint16(w[0:2], r.SrcAddress)
+	binary.BigEndian.PutUint16(w[2:4], r.DstAddress)
+	w[4] = r.Code
 	binary.BigEndian.PutUint16(w[5:9], 0)
 
 	if len == 13 {
-		copy(w[9:13], r.reserveForOEM[:4])
+		copy(w[9:13], r.ReserveForOEM[:4])
 	}
 	return w, nil
 }
 
 func unpackReqAC(b []byte) (w Msg, err error) {
 	r := &MsgAliveChkReq{
-		id: aliveCheckRequest,
+		id: AliveCheckRequest,
 	}
 	return r, nil
 }
@@ -298,10 +303,10 @@ func unpackReqDM(b []byte) (w Msg, err error) {
 		return nil, ErrUnpackTooShort
 	}
 	m := &MsgDiagMsgReq{
-		id:         diagnosticMessage,
-		srcAddress: binary.BigEndian.Uint16(b[0:2]),
-		dstAddress: binary.BigEndian.Uint16(b[2:4]),
-		userdata:   b[4:],
+		Id:         DiagnosticMessage,
+		SrcAddress: binary.BigEndian.Uint16(b[0:2]),
+		DstAddress: binary.BigEndian.Uint16(b[2:4]),
+		Userdata:   b[4:],
 	}
 	return m, nil
 }
@@ -311,12 +316,12 @@ func packResDM(m Msg) ([]byte, error) {
 	if !ok {
 		return nil, ErrPackNil
 	}
-	len := 5 + len(r.userdata)
+	len := 5 + len(r.Userdata)
 	w := make([]byte, len)
-	binary.BigEndian.PutUint16(w[0:2], r.srcAddress)
-	binary.BigEndian.PutUint16(w[2:4], r.dstAddress)
-	w[4] = r.ackCode
-	copy(w[5:len], r.userdata)
+	binary.BigEndian.PutUint16(w[0:2], r.SrcAddress)
+	binary.BigEndian.PutUint16(w[2:4], r.DstAddress)
+	w[4] = r.AckCode
+	copy(w[5:len], r.Userdata)
 	return w, nil
 }
 
@@ -325,10 +330,10 @@ func packResInd(m Msg) ([]byte, error) {
 	if !ok {
 		return nil, ErrPackNil
 	}
-	len := 4 + len(r.userdata)
+	len := 4 + len(r.Userdata)
 	w := make([]byte, len)
-	binary.BigEndian.PutUint16(w[0:2], r.srcAddress)
-	binary.BigEndian.PutUint16(w[2:4], r.dstAddress)
-	copy(w[4:len], r.userdata)
+	binary.BigEndian.PutUint16(w[0:2], r.SrcAddress)
+	binary.BigEndian.PutUint16(w[2:4], r.DstAddress)
+	copy(w[4:len], r.Userdata)
 	return w, nil
 }

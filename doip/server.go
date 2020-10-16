@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -67,17 +65,24 @@ type response struct {
 // registered patterns add calls the handler for the pattern
 // that most closely matches the message type.
 type ServeMux struct {
-	z map[MsgTid]Handler
-	m *sync.RWMutex
-	f func(context.Context, net.Addr) <-chan *MsgDiagMsgInd
+	z  map[MsgTid]Handler
+	m  *sync.RWMutex
+	f  func(context.Context, net.Addr) <-chan *MsgDiagMsgInd
+	ff NotifyChan
 }
 
-// NewServeMux allocates and returns a new ServeMux.
-func NewServeMux(f func(context.Context, net.Addr) <-chan *MsgDiagMsgInd) *ServeMux {
+//NotifyChan give the ability for the server to notify the client with async way.
+type NotifyChan interface {
+	Send(addr string, src uint16, dst uint16, data []byte)
+	MakeARcvChan(ctx context.Context, a net.Addr) <-chan *MsgDiagMsgInd
+}
+
+//NewServeMuxWithNotifyChan allocate a new ServerMux with async notify channel.
+func NewServeMuxWithNotifyChan(ch NotifyChan) *ServeMux {
 	return &ServeMux{
-		z: make(map[MsgTid]Handler),
-		m: new(sync.RWMutex),
-		f: f,
+		z:  make(map[MsgTid]Handler),
+		m:  new(sync.RWMutex),
+		ff: ch,
 	}
 }
 
@@ -99,7 +104,7 @@ func (mux *ServeMux) match(t MsgTid) Handler {
 
 // NewIndChan return a indication channel to the ServerMux
 func (mux *ServeMux) NewIndChan(ctx context.Context, a net.Addr) <-chan *MsgDiagMsgInd {
-	return mux.f(ctx, a)
+	return mux.ff.MakeARcvChan(ctx, a)
 }
 
 // Handle adds a handler to the ServeMux for pattern.
@@ -172,23 +177,20 @@ func (f HandlerFunc) ServeDoIP(w ResponseWriter, r Msg) {
 
 // ListenAndServe Starts a server on address and network specified Invoke handler
 // for incoming queries.
-func ListenAndServe(addr string, network string, handler UDSHandler, logger io.Writer) error {
+func ListenAndServe(addr string, network string, handler UDSHandler, logger Logger) error {
 	server := &Server{
 		Addr:    addr,
 		Net:     network,
 		Handler: handler,
 	}
 
-	if logger == nil {
-		logger = ioutil.Discard
-	}
-	server.log = log.New(logger, "DoIP: ", log.Llongfile|log.Lmicroseconds)
+	server.log = logger
 	return server.ListenAndServe()
 }
 
 // ListenAndServeTLS acts like http.ListenAndServeTLS, more information in
 // http://golang.org/pkg/net/http/#ListenAndServeTLS
-func ListenAndServeTLS(addr, certFile, keyFile string, handler UDSHandler, logger io.Writer) error {
+func ListenAndServeTLS(addr, certFile, keyFile string, handler UDSHandler, logger Logger) error {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return err
@@ -205,10 +207,7 @@ func ListenAndServeTLS(addr, certFile, keyFile string, handler UDSHandler, logge
 		Handler:   handler,
 	}
 
-	if logger == nil {
-		logger = ioutil.Discard
-	}
-	server.log = log.New(logger, "DoIP Srv: ", log.Llongfile|log.Lmicroseconds)
+	server.log = logger
 	return server.ListenAndServe()
 }
 
@@ -240,7 +239,7 @@ type Server struct {
 	// Tracking on the living connections
 	activeConn map[*net.Conn]userInfo
 	// Logging
-	log *log.Logger
+	log Logger
 }
 
 // see the Table 39 for the definition of Logical Address
@@ -261,7 +260,7 @@ func (srv *Server) ListenAndServe() error {
 	if srv.InterceptRead == nil {
 		srv.InterceptRead = func(c *net.Conn, m Msg) error {
 			switch m.GetID() {
-			case routingActivationRequest, aliveCheckRequest:
+			case RoutingActivationRequest, AliveCheckRequest:
 				return nil
 			default:
 				srv.lock.Lock()
@@ -282,12 +281,12 @@ func (srv *Server) ListenAndServe() error {
 		//        :rev ~rev  payloadType
 		srv.InterceptWrite = func(c *net.Conn, b []byte) {
 			t := (MsgTid)(binary.BigEndian.Uint16(b[2:4]))
-			//srv.log.Printf("InterceptWrite %v", t)
+			//srv.log.Debugf("InterceptWrite %v", t)
 			switch t {
-			case routingActivationResponse:
+			case RoutingActivationResponse:
 				var externalAddr uint16
 				// b[12] is the AckCode, 0 : ACK others: NACK
-				if b[12] == routingSuccessfullyActivated {
+				if b[12] == RoutingSuccessfullyActivated {
 					externalAddr = binary.BigEndian.Uint16(b[8:10])
 				}
 				srv.updateConn(c, userInfo{address: externalAddr})
@@ -310,7 +309,7 @@ func (srv *Server) ListenAndServe() error {
 		srv.lock.Unlock()
 
 		addr := srv.Listener.Addr().(*net.TCPAddr)
-		srv.log.Printf("Started server at %s", addr)
+		srv.log.Debugf("Started server at %s", addr)
 
 		err = srv.serveTCP(l)
 		srv.lock.Lock() // to satisfy the defer at the top
@@ -331,7 +330,7 @@ func (srv *Server) ListenAndServe() error {
 		srv.lock.Unlock()
 
 		addr := srv.Listener.Addr().(*net.TCPAddr)
-		srv.log.Printf("Started server at %s", addr)
+		srv.log.Debugf("Started server at %s", addr)
 
 		err = srv.serveTCP(l)
 		srv.lock.Lock() // to satisfy the defer at the top
@@ -386,7 +385,7 @@ func (srv *Server) serveTCP(l net.Listener) error {
 			break
 		}
 		//Setup a new context
-		srv.log.Printf("New connection on %s", rw.RemoteAddr().String())
+		srv.log.Debugf("New connection on %s", rw.RemoteAddr().String())
 		wg.Add(1)
 		go srv.serve(&wg, handler, rw.RemoteAddr(), rw) // Should I attach the parameters with context?
 	}
@@ -411,7 +410,7 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 	// new goroutine was created for receiving indication from UpperLayer (f.g UDS)
 	errInd := make(chan error, 1)
 	go func() {
-		srv.log.Printf("Server new goroutine (%s)\n", w.RemoteAddr().String())
+		srv.log.Debugf("Server new goroutine (%s)\n", w.RemoteAddr().String())
 		c := h.NewIndChan(ctx, a)
 		if c == nil {
 			return
@@ -422,7 +421,7 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 			case m, ok := <-c:
 				// Closed
 				if !ok {
-					srv.log.Printf("UDS IndChan closed (%s), exiting...", w.RemoteAddr().String())
+					srv.log.Debugf("UDS IndChan closed (%s), exiting...", w.RemoteAddr().String())
 					errInd <- errors.New("UDS IndChan closed")
 					break LL
 				}
@@ -453,17 +452,17 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 	for {
 		r, id, err := reader.ReadTCP(w.tcp, idleTimeout)
 		if err != nil {
-			srv.log.Printf("rcv error on ReadTcp %v\n", err.Error())
+			srv.log.Debugf("rcv error on ReadTcp %v\n", err.Error())
 			goto Exit
 		}
 		m, e := Unpack(r, id)
 		if e != nil { // Send a FormatError back
-			srv.log.Printf("rcv error on %v\n", e.Error())
+			srv.log.Debugf("rcv error on %v\n", e.Error())
 			continue
 		}
 		// Security Check
 		if srv.InterceptRead(&t, m) != nil {
-			srv.log.Printf("InterceptRead err")
+			srv.log.Debugf("InterceptRead err")
 			failedHandler(w, DoIPHdrErrSecurity)
 			continue
 		}
@@ -476,9 +475,9 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 	*/
 Exit:
 	if err != nil {
-		srv.log.Printf("Exit server with %s\n", a.String())
+		srv.log.Debugf("Exit server with %s\n", a.String())
 	} else {
-		srv.log.Println("Exit server peacefully")
+		srv.log.Debugf("Exit server peacefully with %s", a.String())
 	}
 	// close the net.Conn
 	w.Close()
@@ -560,7 +559,7 @@ func (srv *Server) trackConn(c *net.Conn, add bool) {
 func (srv *Server) updateConn(c *net.Conn, t userInfo) {
 	srv.lock.Lock()
 	defer srv.lock.Unlock()
-	//srv.log.Printf("updateConn %v", t.address)
+	//srv.log.Debugf("updateConn %v", t.address)
 	srv.activeConn[c] = t
 }
 
@@ -634,8 +633,61 @@ func (w *response) Close() error {
 
 func failedHandler(w ResponseWriter, err byte) {
 	m := &MsgNACKReq{
-		id:      genericHeaderNegativeAcknowledge,
+		id:      GenericHeaderNegativeAcknowledge,
 		errCode: err,
 	}
 	w.WriteMsg(m)
+}
+
+//RunLocalTCPServer give a method to start and run a server.
+func RunLocalTCPServer(addr string, handler UDSHandler, logger Logger) (*Server, string, error) {
+	server := &Server{
+		Addr:    addr,
+		Net:     "tcp",
+		Handler: handler,
+		log:     logger,
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	server.NotifyStartedFunc = func() {
+		wg.Done()
+	}
+
+	go func() {
+		server.ListenAndServe()
+	}()
+
+	wg.Wait()
+	return server, addr, nil
+}
+
+//RunLocalTLSServer give a method to start and run a server.
+func RunLocalTLSServer(addr string, handler UDSHandler, cert tls.Certificate, logger Logger) (*Server, string, error) {
+	config := tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	server := &Server{
+		Addr:      addr,
+		Net:       "tcp-tls",
+		TLSConfig: &config,
+		Handler:   handler,
+		log:       logger,
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	server.NotifyStartedFunc = func() {
+		wg.Done()
+	}
+
+	go func() {
+		server.ListenAndServe()
+	}()
+
+	wg.Wait()
+	return server, addr, nil
 }

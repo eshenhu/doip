@@ -4,8 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -20,7 +18,7 @@ const (
 
 // DoIP struct : internal represation on L3
 type DoIP struct {
-	log         *log.Logger
+	log         Logger
 	source      uint16
 	server      string
 	readTimeout time.Duration
@@ -89,18 +87,14 @@ func (d doIPError) IsDisconnected() bool {
 // Initiates the inputLoop routine to receive messages from the socket and
 // the periodicTesterPresent routine for periodic requests to indicate that the client is still connected
 // Returns the doip object and any error encountered.
-func NewDoIP(logger io.Writer, sourceAddress uint16, server string) *DoIP {
+func NewDoIP(logger Logger, sourceAddress uint16, server string) *DoIP {
 	d := &DoIP{
 		source:      sourceAddress,
 		readTimeout: readTimeout,
 		server:      server,
 	}
 
-	if logger == nil {
-		logger = ioutil.Discard
-	}
-
-	d.log = log.New(logger, "DoIP Client: ", log.Llongfile|log.Lmicroseconds)
+	d.log = logger
 	return d
 }
 
@@ -115,7 +109,7 @@ func (d *DoIP) SetReadTimeout(timeout time.Duration) {
 func (d *DoIP) Connect() (err error) {
 	conn, err := net.DialTimeout("tcp", d.server, 10*time.Second)
 	if err != nil {
-		d.log.Println("Dial failed")
+		d.log.Debug("Dial failed")
 		return
 	}
 
@@ -130,7 +124,7 @@ func (d *DoIP) Connect() (err error) {
 
 	err = d.activationHandshake()
 	if err != nil {
-		d.log.Printf("Activation handshake failed %v\n", err.Error())
+		d.log.Debugf("Activation handshake failed %v\n", err.Error())
 		// we have to call disconnect here in order to close the connection and stop the input loop
 		d.Disconnect()
 		return
@@ -142,7 +136,7 @@ func (d *DoIP) Connect() (err error) {
 
 // Disconnect : closes the connection to the server
 func (d *DoIP) Disconnect() {
-	d.log.Printf("Disconnect... ")
+	d.log.Debugf("Disconnect... ")
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	if d.connection == nil {
@@ -151,7 +145,7 @@ func (d *DoIP) Disconnect() {
 	close(d.running)
 	err := d.connection.Close()
 	if err != nil {
-		d.log.Printf("Failed to close the socket (%v)", err)
+		d.log.Debugf("Failed to close the socket (%v)", err)
 	}
 	d.connection = nil
 	return
@@ -159,7 +153,7 @@ func (d *DoIP) Disconnect() {
 
 // Exchange : sync way to send and rcv roundtrip message to the DoIP entity.
 func (d *DoIP) Exchange(targetAddr uint16, writeData []byte) (readData []byte, err error) {
-	if err := d.Send(targetAddr, diagnosticMessage, writeData); err != nil {
+	if err := d.SendRaw(targetAddr, DiagnosticMessage, writeData); err != nil {
 		return nil, err
 	}
 	_, _, readData, err = d.Receive()
@@ -178,7 +172,7 @@ func (d *DoIP) SendMsg(m MsgReq) error {
 	binary.BigEndian.PutUint16(buffer[2:4], (uint16)(m.GetID()))
 
 	switch m.GetID() {
-	case aliveCheckRequest:
+	case AliveCheckRequest:
 		binary.BigEndian.PutUint32(buffer[4:8], 0)
 	default:
 		binary.BigEndian.PutUint32(buffer[4:8], uint32(ll))
@@ -188,7 +182,7 @@ func (d *DoIP) SendMsg(m MsgReq) error {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	if d.connection == nil {
-		d.log.Printf("Attempt to send when not connected")
+		d.log.Debugf("Attempt to send when not connected")
 		return sessionDisconnected
 	}
 	// TODO: Should we check the number of bytes and try again if less then expected?
@@ -196,13 +190,18 @@ func (d *DoIP) SendMsg(m MsgReq) error {
 	return err
 }
 
-// Send : Send only method
-func (d *DoIP) Send(TargetAddress uint16, payloadType MsgTid, data []byte) error {
+// Send :
+func (d *DoIP) Send(TargetAddress uint16, data []byte) error {
+	return d.SendRaw(TargetAddress, DiagnosticMessage, data)
+}
+
+// SendRaw : Send only method
+func (d *DoIP) SendRaw(TargetAddress uint16, payloadType MsgTid, data []byte) error {
 	var size int
 	switch payloadType {
-	case aliveCheckRequest:
+	case AliveCheckRequest:
 		size = 8
-	case routingActivationRequest:
+	case RoutingActivationRequest:
 		size = 10
 	default:
 		size = 12
@@ -215,12 +214,12 @@ func (d *DoIP) Send(TargetAddress uint16, payloadType MsgTid, data []byte) error
 	binary.BigEndian.PutUint16(buffer[2:4], (uint16)(payloadType))
 
 	switch payloadType {
-	case aliveCheckRequest:
-	case routingActivationRequest:
+	case AliveCheckRequest:
+	case RoutingActivationRequest:
 		binary.BigEndian.PutUint32(buffer[4:8], uint32(len(data))+2)
 		binary.BigEndian.PutUint16(buffer[8:10], uint16(d.source))
 		copy(buffer[10:], data)
-	case diagnosticMessage:
+	case DiagnosticMessage:
 		binary.BigEndian.PutUint32(buffer[4:8], uint32(len(data))+4)
 		binary.BigEndian.PutUint16(buffer[8:10], uint16(d.source))
 		binary.BigEndian.PutUint16(buffer[10:12], uint16(TargetAddress))
@@ -232,7 +231,7 @@ func (d *DoIP) Send(TargetAddress uint16, payloadType MsgTid, data []byte) error
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	if d.connection == nil {
-		d.log.Printf("DoIP: Attempt to send when not connected")
+		d.log.Debugf("DoIP: Attempt to send when not connected")
 		return sessionDisconnected
 	}
 	// TODO: Should we check the number of bytes and try again if less then expected?
@@ -252,17 +251,17 @@ func (d *DoIP) Receive() (source uint16, target uint16, data []byte, err error) 
 			return
 		}
 		err = sessionDisconnected
-		d.log.Printf("%v", err)
+		d.log.Debugf("%v", err)
 
 	case err, ok = <-d.errChan:
 		if !ok {
 			err = sessionDisconnected
 		}
-		d.log.Printf("%v", err)
+		d.log.Debugf("%v", err)
 
 	case <-time.After(d.readTimeout):
 		err = timeout
-		d.log.Printf("%v", err)
+		d.log.Debugf("%v", err)
 	}
 	return
 }
@@ -271,17 +270,17 @@ func (d *DoIP) Receive() (source uint16, target uint16, data []byte, err error) 
 // to indicate that the client is still connected and that the diagnostic services are to remain active
 // 7.1.7
 func (d *DoIP) aliveCheckPeriodical() {
-	d.log.Printf("Starting alive routine (%s)\n", d.connection.LocalAddr().String())
-	defer d.log.Printf("Stopping alive routine (%s)\n", d.connection.LocalAddr().String())
+	d.log.Debugf("Starting alive routine (%s)\n", d.connection.LocalAddr().String())
+	defer d.log.Debugf("Stopping alive routine (%s)\n", d.connection.LocalAddr().String())
 	for {
 		select {
 		case <-time.After(aliveTimeout):
-			err := d.Send(0, aliveCheckRequest, nil)
+			err := d.SendRaw(0, AliveCheckRequest, nil)
 			if err != nil {
-				d.log.Printf("TesterPresent send error %s", err)
+				d.log.Debugf("TesterPresent send error %s", err)
 			}
 		case <-d.running:
-			d.log.Printf("Stop alive routine as closed(%s)\n", d.connection.LocalAddr().String())
+			d.log.Debugf("Stop alive routine as closed(%s)\n", d.connection.LocalAddr().String())
 			return
 		}
 	}
@@ -289,7 +288,7 @@ func (d *DoIP) aliveCheckPeriodical() {
 
 // See Table 22
 func (d *DoIP) activationHandshake() (err error) {
-	err = d.Send(d.source, routingActivationRequest, []byte{0x00, 0x00, 0x00, 0x00, 0x00})
+	err = d.SendRaw(d.source, RoutingActivationRequest, []byte{0x00, 0x00, 0x00, 0x00, 0x00})
 	if err != nil {
 		return
 	}
@@ -299,7 +298,7 @@ func (d *DoIP) activationHandshake() (err error) {
 		return
 	}
 	// See Table 25
-	if len(data) > 0 && data[0] != routingSuccessfullyActivated {
+	if len(data) > 0 && data[0] != RoutingSuccessfullyActivated {
 		err = routingActivationResponseFailed
 	}
 	return
@@ -328,12 +327,12 @@ func (d *DoIP) inputLoop(connection net.Conn) {
 		n, err := io.ReadFull(connection, header[:])
 		if err != nil {
 			if !d.isStopped() && err != io.EOF && err != io.ErrUnexpectedEOF {
-				d.log.Printf("DoIP: Failed to read from socket (recv: %v of %v, err: %v)", n, 8, err)
+				d.log.Debugf("DoIP: Failed to read from socket (recv: %v of %v, err: %v)", n, 8, err)
 			}
 			return
 		}
 		if header[0] != protocolVersion || header[1] != inverseProtocolVersion {
-			d.log.Printf("DoIP Protocol Error")
+			d.log.Debugf("DoIP Protocol Error")
 			d.errChan <- incorrectPatternFormat
 			continue
 		}
@@ -347,7 +346,7 @@ func (d *DoIP) inputLoop(connection net.Conn) {
 		n, err = io.ReadFull(connection, payload)
 		if err != nil {
 			if !d.isStopped() && err != io.EOF && err != io.ErrUnexpectedEOF {
-				d.log.Printf("DoIP: Failed to read from socket (recv: %v of %v, err: %v)", n, dataSize, err)
+				d.log.Debugf("DoIP: Failed to read from socket (recv: %v of %v, err: %v)", n, dataSize, err)
 			}
 			return
 		}
@@ -355,23 +354,23 @@ func (d *DoIP) inputLoop(connection net.Conn) {
 		sourceAddress, targetAddress := parseAddresses(payloadType, payload)
 
 		switch {
-		case payloadType == aliveCheckResponse:
+		case payloadType == AliveCheckResponse:
 			//Todo: Tracking on the activity of the client, terminate connection if Timeout
-		case payloadType == genericHeaderNegativeAcknowledge:
-			d.log.Println("DoIP: NACK - drop message")
+		case payloadType == GenericHeaderNegativeAcknowledge:
+			d.log.Debug("DoIP: NACK - drop message")
 			d.errChan <- unknownPayloadType
 
 		case targetAddress != uint16(d.source):
-			d.log.Printf("DoIP: Unknown target address %v - drop message %v", targetAddress, payloadType)
+			d.log.Debugf("DoIP: Unknown target address %v - drop message %v", targetAddress, payloadType)
 			d.errChan <- unmatchedSrcAddr
 
-		case payloadType == routingActivationResponse && dataSize != uint32(len(payload)):
+		case payloadType == RoutingActivationResponse && dataSize != uint32(len(payload)):
 			d.errChan <- invalidPayloadLength
 
-		case payloadType == diagnosticMessageNegativeAcknowledge:
+		case payloadType == DiagnosticMessageNegativeAcknowledge:
 			d.errChan <- negativeAck
 
-		case payloadType == diagnosticMessagePositiveAcknowledge:
+		case payloadType == DiagnosticMessagePositiveAcknowledge:
 			// This type carries tester present response and other messages that can be discarded
 			d.inChan <- &doIPMessage{
 				source: sourceAddress,
@@ -379,14 +378,14 @@ func (d *DoIP) inputLoop(connection net.Conn) {
 				data:   payload[5:],
 			}
 
-		case payloadType == diagnosticMessage || payloadType == routingActivationResponse:
+		case payloadType == DiagnosticMessage || payloadType == RoutingActivationResponse:
 			d.inChan <- &doIPMessage{
 				source: sourceAddress,
 				target: targetAddress,
 				data:   payload[4:],
 			}
 		default:
-			d.log.Printf("DoIP: Unknown payload type - drop message")
+			d.log.Debugf("DoIP: Unknown payload type - drop message")
 			d.errChan <- unknownPayloadType
 		}
 	}
@@ -394,20 +393,20 @@ func (d *DoIP) inputLoop(connection net.Conn) {
 
 func parseAddresses(payloadType MsgTid, payload []byte) (sourceAddress uint16, targetAddress uint16) {
 	switch payloadType {
-	case routingActivationResponse:
+	case RoutingActivationResponse:
 		targetAddress = binary.BigEndian.Uint16(payload[0:2])
 		sourceAddress = binary.BigEndian.Uint16(payload[2:4])
 
-	case genericHeaderNegativeAcknowledge:
+	case GenericHeaderNegativeAcknowledge:
 
-	case diagnosticMessage:
+	case DiagnosticMessage:
 		fallthrough
-	case diagnosticMessagePositiveAcknowledge:
+	case DiagnosticMessagePositiveAcknowledge:
 		fallthrough
-	case diagnosticMessageNegativeAcknowledge:
+	case DiagnosticMessageNegativeAcknowledge:
 		sourceAddress = binary.BigEndian.Uint16(payload[0:2])
 		targetAddress = binary.BigEndian.Uint16(payload[2:4])
-	case aliveCheckResponse:
+	case AliveCheckResponse:
 		targetAddress = binary.BigEndian.Uint16(payload[0:2])
 	}
 	return

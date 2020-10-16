@@ -2,8 +2,7 @@ package doip
 
 import (
 	"crypto/rand"
-	"io"
-	"io/ioutil"
+	"fmt"
 	_ "io/ioutil"
 	"log"
 	"net"
@@ -21,7 +20,7 @@ const (
 )
 
 var (
-	loge io.Writer = ioutil.Discard
+	port int
 )
 
 // Server : DoIP server
@@ -33,25 +32,25 @@ type DoIPServer struct {
 }
 
 func TestShutdownSrvDuringOngoingActiveClient(t *testing.T) {
-	c := NewDoIPTest(loge)
+	c := NewNotifyChan(loge)
 	defer c.Close()
 
-	mux := NewServeMux(c.genOutChan)
-	mux.HandleFunc(routingActivationRequest, handlerRoutingActiveReq)
+	mux := NewServeMuxWithNotifyChan(c)
+	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
 
-	srv, _, err := RunLocalTCPServer("127.0.0.1:13400", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
 	//t.Logf("number of goroutines (before client) is %v\n", runtime.NumGoroutine())
-
-	doIP := NewDoIP(loge, 0x0E80, "127.0.0.1:13400")
+	addr := srv.Listener.Addr().(*net.TCPAddr)
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", addr.Port))
 	doIP.Connect()
 
 	time.Sleep(1000 * time.Microsecond) //give some time to server
 	srv.Shutdown()
 
-	err = doIP.Send(0x1D01, routingActivationRequest, []byte{0, 0, 0, 0, 0})
+	err = doIP.SendRaw(0x1D01, RoutingActivationRequest, []byte{0, 0, 0, 0, 0})
 	assert.NoError(t, err)
 
 	_, _, _, err = doIP.Receive()
@@ -62,35 +61,36 @@ func TestShutdownSrvDuringOngoingActiveClient(t *testing.T) {
 }
 
 func TestDisconnectScenarios(t *testing.T) {
-	c := NewDoIPTest(loge)
+	c := NewNotifyChan(loge)
 	defer c.Close()
 
-	mux := NewServeMux(c.genOutChan)
-	mux.HandleFunc(routingActivationRequest, handlerRoutingActiveReq)
-	mux.HandleFunc(diagnosticMessage, handlerDiagMsgReq)
+	mux := NewServeMuxWithNotifyChan(c)
+	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
+	mux.HandleFunc(DiagnosticMessage, handlerDiagMsgReq)
 
-	srv, _, err := RunLocalTCPServer("127.0.0.1:13400", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
 	defer srv.Shutdown()
-	time.Sleep(1000 * time.Millisecond)
+	port = srv.Listener.Addr().(*net.TCPAddr).Port
 
+	time.Sleep(1000 * time.Millisecond)
 	t.Run("testNoRegSrvType", testNoRegSrvType)
 	t.Run("testNormalRAReq", testNormalRAReq)
 	t.Run("testAbnormalRoutingActReq", testAbnormalRoutingActReq)
 	t.Run("testDiagMessageReq", testDiagMessageReq)
-	t.Run("testCheckGoroutineResource", testCheckGoroutineResource)
+	//t.Run("testCheckGoroutineResource", testCheckGoroutineResource)
 }
 
 func testNoRegSrvType(t *testing.T) {
-	doIP := NewDoIP(loge, 0x0E80, "127.0.0.1:13400")
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", port))
 	defer doIP.Disconnect()
 
 	doIP.SetReadTimeout(200 * time.Millisecond)
 	doIP.Connect()
 
-	err := doIP.Send(0, aliveCheckRequest, []byte{})
+	err := doIP.SendRaw(0, AliveCheckRequest, []byte{})
 	assert.NoError(t, err)
 
 	_, _, _, err = doIP.Receive()
@@ -99,19 +99,19 @@ func testNoRegSrvType(t *testing.T) {
 }
 
 func testNormalRAReq(t *testing.T) {
-	doIP := NewDoIP(loge, 0x0E80, "127.0.0.1:13400")
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", port))
 	defer doIP.Disconnect()
 
 	doIP.SetReadTimeout(200 * time.Millisecond)
 	doIP.Connect()
 
-	//err := doIP.Send(0x1D01, routingActivationRequest, []byte{0, 0, 0, 0, 0})
+	//err := doIP.Send(0x1D01, RoutingActivationRequest, []byte{0, 0, 0, 0, 0})
 	req := &MsgActivationReq{
-		id:             routingActivationRequest,
-		srcAddress:     0x0E80,
-		activationType: 0,
-		reserveForStd:  []byte{0, 0, 0, 0},
-		reserveForOEM:  []byte{},
+		Id:             RoutingActivationRequest,
+		SrcAddress:     0x0E80,
+		ActivationType: 0,
+		ReserveForStd:  []byte{0, 0, 0, 0},
+		ReserveForOEM:  []byte{},
 	}
 
 	err := doIP.SendMsg(req)
@@ -122,14 +122,14 @@ func testNormalRAReq(t *testing.T) {
 }
 
 func testAbnormalRoutingActReq(t *testing.T) {
-	doIP := NewDoIP(loge, 0x0E80, "127.0.0.1:13400")
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", port))
 	defer doIP.Disconnect()
 
 	doIP.SetReadTimeout(200 * time.Millisecond)
 	doIP.Connect()
 
 	// bad format on payload
-	err := doIP.Send(0x1D01, routingActivationRequest, []byte{0})
+	err := doIP.SendRaw(0x1D01, RoutingActivationRequest, []byte{0})
 	assert.NoError(t, err)
 
 	_, _, _, err = doIP.Receive()
@@ -150,7 +150,7 @@ func testCheckGoroutineResource(t *testing.T) {
 
 	//Stage 1
 	for i := 0; i < n; i++ {
-		clients[i] = NewDoIP(loge, 0x0E80+(uint16)(i), "127.0.0.1:13400")
+		clients[i] = NewDoIP(loge, 0x0E80+(uint16)(i), fmt.Sprintf("127.0.0.1:%d", port))
 		clients[i].SetReadTimeout(2000 * time.Millisecond)
 		err := clients[i].Connect()
 		assert.NoError(t, err)
@@ -161,11 +161,11 @@ func testCheckGoroutineResource(t *testing.T) {
 	//Stage 2
 	for i := 0; i < n; i++ {
 		req := &MsgActivationReq{
-			id:             routingActivationRequest,
-			srcAddress:     0x0E80 + (uint16)(i),
-			activationType: 0,
-			reserveForStd:  []byte{0, 0, 0, 0},
-			reserveForOEM:  []byte{},
+			Id:             RoutingActivationRequest,
+			SrcAddress:     0x0E80 + (uint16)(i),
+			ActivationType: 0,
+			ReserveForStd:  []byte{0, 0, 0, 0},
+			ReserveForOEM:  []byte{},
 		}
 
 		err := clients[i].SendMsg(req)
@@ -187,14 +187,14 @@ func testCheckGoroutineResource(t *testing.T) {
 }
 
 func testDiagMessageReq(t *testing.T) {
-	doIP := NewDoIP(loge, 0x0E80, "127.0.0.1:13400")
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", port))
 	defer doIP.Disconnect()
 	doIP.Connect()
 
 	token := make([]byte, 1200*10)
 	rand.Read(token)
 	// bad format on payload
-	err := doIP.Send(0x1D01, diagnosticMessage, token)
+	err := doIP.SendRaw(0x1D01, DiagnosticMessage, token)
 	assert.NoError(t, err)
 
 	_, _, tokenR, err := doIP.Receive()
@@ -203,21 +203,22 @@ func testDiagMessageReq(t *testing.T) {
 }
 
 func TestNormalDiagMessageReq(t *testing.T) {
-	c := NewDoIPTest(loge)
+	c := NewNotifyChan(loge)
 	defer c.Close()
 
-	mux := NewServeMux(c.genOutChan)
-	mux.HandleFunc(routingActivationRequest, handlerRoutingActiveReq)
-	mux.HandleFunc(diagnosticMessage, handlerDiagMsgReq)
+	mux := NewServeMuxWithNotifyChan(c)
+	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
+	mux.HandleFunc(DiagnosticMessage, handlerDiagMsgReq)
 
-	srv, _, err := RunLocalTCPServer("127.0.0.1:13400", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
 	defer srv.Shutdown()
 	time.Sleep(1000 * time.Millisecond)
 
-	doIP := NewDoIP(loge, 0x0E80, "127.0.0.1:13400")
+	addr := srv.Listener.Addr().(*net.TCPAddr)
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", addr.Port))
 	doIP.Connect()
 	defer doIP.Disconnect()
 
@@ -226,7 +227,7 @@ func TestNormalDiagMessageReq(t *testing.T) {
 
 	var tokenR []byte
 	// bad format on payload
-	err = doIP.Send(0x1D01, diagnosticMessage, token)
+	err = doIP.SendRaw(0x1D01, DiagnosticMessage, token)
 	assert.NoError(t, err)
 
 	_, _, tokenR, err = doIP.Receive()
@@ -239,20 +240,21 @@ func TestNormalDiagMessageReq(t *testing.T) {
 }
 
 func TestAbnormalDiagMessageReq(t *testing.T) {
-	c := NewDoIPTest(loge)
+	c := NewNotifyChan(loge)
 	defer c.Close()
 
-	mux := NewServeMux(c.genOutChan)
-	mux.HandleFunc(routingActivationRequest, handlerRoutingActiveNAckReq)
+	mux := NewServeMuxWithNotifyChan(c)
+	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveNAckReq)
 
-	srv, _, err := RunLocalTCPServer("127.0.0.1:13400", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
 	defer srv.Shutdown()
 	time.Sleep(1000 * time.Millisecond)
 
-	doIP := NewDoIP(loge, 0x0E80, "127.0.0.1:13400")
+	addr := srv.Listener.Addr().(*net.TCPAddr)
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", addr.Port))
 	defer doIP.Disconnect()
 	err = doIP.Connect()
 	assert.Error(t, err)
@@ -260,21 +262,22 @@ func TestAbnormalDiagMessageReq(t *testing.T) {
 }
 
 func TestNormalDiagMessageInd(t *testing.T) {
-	c := NewDoIPTest(loge)
+	c := NewNotifyChan(loge)
 	defer c.Close()
 
-	mux := NewServeMux(c.genOutChan)
-	mux.HandleFunc(routingActivationRequest, handlerRoutingActiveReq)
-	mux.HandleFunc(diagnosticMessage, handlerDiagMsgReq)
+	mux := NewServeMuxWithNotifyChan(c)
+	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
+	mux.HandleFunc(DiagnosticMessage, handlerDiagMsgReq)
 
-	srv, _, err := RunLocalTCPServer("127.0.0.1:13400", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
 	defer srv.Shutdown()
 	time.Sleep(1000 * time.Millisecond)
 
-	doIP := NewDoIP(loge, 0x0E80, "127.0.0.1:13400")
+	addrTcp := srv.Listener.Addr().(*net.TCPAddr)
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", addrTcp.Port))
 	doIP.Connect()
 	defer doIP.Disconnect()
 
@@ -287,14 +290,14 @@ func TestNormalDiagMessageInd(t *testing.T) {
 	assert.Equal(t, tokenR, token)
 
 	addr := doIP.connection.LocalAddr().String()
-	c.feedin(addr, 0x1D01, 0x0E80, token)
+	c.Send(addr, 0x1D01, 0x0E80, token)
 
 	_, _, tokenR, err = doIP.Receive()
 	assert.NoError(t, err)
 	assert.Equal(t, tokenR, token)
 
 	// feed into a wrong address different with the external tools
-	c.feedin(addr, 0x1D01, 0x0E81, token)
+	c.Send(addr, 0x1D01, 0x0E81, token)
 
 	_, _, tokenR, err = doIP.Receive()
 	assert.Error(t, err)

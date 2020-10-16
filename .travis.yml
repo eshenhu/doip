@@ -1,12 +1,11 @@
 language: go
 sudo: false
 go:
-  - 1.9.x
   - tip
 
 env:
-  - TESTS="-race -v -bench=. -coverprofile=coverage.txt -covermode=atomic"
-  - TESTS="-race -v ./..."
+  - TESTS="-race -timeout 60s -v -bench=. -coverprofile=coverage.txt -covermode=atomic ./..."
+  - TESTS="-race -timeout 60s -v ./..."
 
 before_install:
   - mkdir -p $GOPATH/src/github.com/eshenhu

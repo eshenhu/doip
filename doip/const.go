@@ -7,14 +7,14 @@ const (
 
 //Table 12:  DoIP Payload types
 var (
-	genericHeaderNegativeAcknowledge     MsgTid = 0x0000
-	routingActivationRequest             MsgTid = 0x0005
-	routingActivationResponse            MsgTid = 0x0006
-	aliveCheckRequest                    MsgTid = 0x0007
-	aliveCheckResponse                   MsgTid = 0x0008
-	diagnosticMessage                    MsgTid = 0x8001
-	diagnosticMessagePositiveAcknowledge MsgTid = 0x8002
-	diagnosticMessageNegativeAcknowledge MsgTid = 0x8003
+	GenericHeaderNegativeAcknowledge     MsgTid = 0x0000
+	RoutingActivationRequest             MsgTid = 0x0005
+	RoutingActivationResponse            MsgTid = 0x0006
+	AliveCheckRequest                    MsgTid = 0x0007
+	AliveCheckResponse                   MsgTid = 0x0008
+	DiagnosticMessage                    MsgTid = 0x8001
+	DiagnosticMessagePositiveAcknowledge MsgTid = 0x8002
+	DiagnosticMessageNegativeAcknowledge MsgTid = 0x8003
 )
 
 //Table 14: Generic DoIP header NACK codes
@@ -28,6 +28,6 @@ var (
 
 //Table 25: Routing activation response code values
 var (
-	routingDeniedUnsupportedType uint8 = 0x06
-	routingSuccessfullyActivated uint8 = 0x10
+	RoutingDeniedUnsupportedType uint8 = 0x06
+	RoutingSuccessfullyActivated uint8 = 0x10
 )

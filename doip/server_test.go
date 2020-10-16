@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"fmt"
 	"io"
-	"log"
 	"net"
 	"runtime"
 	"sync"
@@ -15,63 +15,27 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func RunLocalTCPServer(addr string, handler UDSHandler, loge io.Writer) (*Server, string, error) {
-	server := &Server{
-		Addr:    addr,
-		Net:     "tcp",
-		Handler: handler,
-		log:     log.New(loge, "DoIP: ", log.Llongfile|log.Lmicroseconds),
-	}
+var loge Logger
 
-	waitLock := sync.Mutex{}
-	waitLock.Lock()
-	server.NotifyStartedFunc = waitLock.Unlock
-
-	go func() {
-		server.ListenAndServe()
-	}()
-
-	waitLock.Lock()
-	return server, addr, nil
+func init() {
+	loge = NewLogger()
 }
 
-func RunLocalTLSServer(addr string, handler UDSHandler, loge io.Writer) (*Server, string, error) {
+func RunLocalTLSServerHlp(addr string, handler UDSHandler, logger Logger) (*Server, string, error) {
 	cert, err := tls.X509KeyPair(CertPEMBlock, KeyPEMBlock)
 	if err != nil {
 		return nil, "", err
 	}
-
-	config := tls.Config{
-		Certificates: []tls.Certificate{cert},
-	}
-
-	server := &Server{
-		Addr:      addr,
-		Net:       "tcp-tls",
-		TLSConfig: &config,
-		Handler:   handler,
-		log:       log.New(loge, "DoIP Tls Srv: ", log.Llongfile|log.Lmicroseconds),
-	}
-
-	waitLock := sync.Mutex{}
-	waitLock.Lock()
-	server.NotifyStartedFunc = waitLock.Unlock
-
-	go func() {
-		server.ListenAndServe()
-	}()
-
-	waitLock.Lock()
-	return server, addr, nil
+	return RunLocalTLSServer(addr, handler, cert, logger)
 }
 
 func TestShutdownTCP(t *testing.T) {
-	c := NewDoIPTest(loge)
+	c := NewNotifyChan(loge)
 	defer c.Close()
 
-	mux := NewServeMux(c.genOutChan)
-	mux.HandleFunc(routingActivationRequest, handlerRoutingActiveReq)
-	mux.HandleFunc(diagnosticMessage, handlerDiagMsgReq)
+	mux := NewServeMuxWithNotifyChan(c)
+	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
+	mux.HandleFunc(DiagnosticMessage, handlerDiagMsgReq)
 
 	numOfGo := runtime.NumGoroutine()
 	srv, _, err := RunLocalTCPServer(":0", mux, loge)
@@ -86,14 +50,28 @@ func TestShutdownTCP(t *testing.T) {
 	assert.LessOrEqual(t, runtime.NumGoroutine(), numOfGo)
 }
 
+func RunLocalServerWithFunc(log io.Writer, h func(w ResponseWriter, r Msg)) (*Server, error) {
+	c := NewNotifyChan(loge)
+
+	mux := NewServeMuxWithNotifyChan(c)
+	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
+	mux.HandleFunc(DiagnosticMessage, h)
+
+	s, _, err := RunLocalTLSServerHlp(":0", mux, loge)
+	if err != nil {
+		return s, err
+	}
+	return s, nil
+}
+
 func TestShutdownTLS(t *testing.T) {
-	c := NewDoIPTest(loge)
+	c := NewNotifyChan(loge)
 	defer c.Close()
 
-	mux := NewServeMux(c.genOutChan)
-	mux.HandleFunc(routingActivationRequest, handlerRoutingActiveReq)
+	mux := NewServeMuxWithNotifyChan(c)
+	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
 
-	s, _, err := RunLocalTLSServer(":0", mux, loge)
+	s, _, err := RunLocalTLSServerHlp(":0", mux, loge)
 	if err != nil {
 		t.Fatalf("unable to run test server: %v", err)
 	}
@@ -107,11 +85,11 @@ func TestServerStartStopRace(t *testing.T) {
 	//t.Logf("number of goroutines (before client) is %v\n", runtime.NumGoroutine())
 	numOfGo := runtime.NumGoroutine()
 	for i := 0; i < 10; i++ {
-		c := NewDoIPTest(loge)
+		c := NewNotifyChan(loge)
 		defer c.Close()
 
-		mux := NewServeMux(c.genOutChan)
-		mux.HandleFunc(routingActivationRequest, handlerRoutingActiveReq)
+		mux := NewServeMuxWithNotifyChan(c)
+		mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
 
 		srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
 		if err != nil {
@@ -131,22 +109,24 @@ func TestServerStartStopRace(t *testing.T) {
 
 func BenchmarkServe(b *testing.B) {
 	b.StopTimer()
-	a := runtime.GOMAXPROCS(4)
+	a := runtime.GOMAXPROCS(2)
 
-	s := NewDoIPTest(loge)
+	s := NewNotifyChan(loge)
 	defer s.Close()
 
-	mux := NewServeMux(s.genOutChan)
-	mux.HandleFunc(routingActivationRequest, handlerRoutingActiveReq)
-	mux.HandleFunc(diagnosticMessage, handlerDiagMsgReq)
+	mux := NewServeMuxWithNotifyChan(s)
+	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
+	mux.HandleFunc(DiagnosticMessage, handlerDiagMsgReq)
 
-	srv, _, err := RunLocalTCPServer("127.0.0.1:13400", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
 	if err != nil {
 		b.Fatalf("Error while starting the server %s", err)
 	}
 	defer srv.Shutdown()
 
-	doIP := NewDoIP(loge, 0x0E80, "127.0.0.1:13400")
+	addr := srv.Listener.Addr().(*net.TCPAddr)
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", addr.Port))
+
 	defer doIP.Disconnect()
 	doIP.Connect()
 
@@ -163,12 +143,12 @@ func BenchmarkServe(b *testing.B) {
 func handlerRoutingActiveReq(w ResponseWriter, r Msg) {
 	rr := r.(*MsgActivationReq)
 	m := &MsgActivationRes{
-		id:            routingActivationResponse,
-		srcAddress:    rr.srcAddress,
-		dstAddress:    localLogicalAddr,
-		code:          routingSuccessfullyActivated,
-		reserveForStd: []byte{0, 0, 0, 0},
-		reserveForOEM: []byte{0, 0, 0, 0},
+		Id:            RoutingActivationResponse,
+		SrcAddress:    rr.SrcAddress,
+		DstAddress:    localLogicalAddr,
+		Code:          RoutingSuccessfullyActivated,
+		ReserveForStd: []byte{0, 0, 0, 0},
+		ReserveForOEM: []byte{0, 0, 0, 0},
 	}
 	w.WriteMsg(m)
 }
@@ -176,12 +156,12 @@ func handlerRoutingActiveReq(w ResponseWriter, r Msg) {
 func handlerRoutingActiveNAckReq(w ResponseWriter, r Msg) {
 	rr := r.(*MsgActivationReq)
 	m := &MsgActivationRes{
-		id:            routingActivationResponse,
-		srcAddress:    rr.srcAddress,
-		dstAddress:    localLogicalAddr,
-		code:          routingDeniedUnsupportedType,
-		reserveForStd: []byte{0, 0, 0, 0},
-		reserveForOEM: []byte{0, 0, 0, 0},
+		Id:            RoutingActivationResponse,
+		SrcAddress:    rr.SrcAddress,
+		DstAddress:    localLogicalAddr,
+		Code:          RoutingDeniedUnsupportedType,
+		ReserveForStd: []byte{0, 0, 0, 0},
+		ReserveForOEM: []byte{0, 0, 0, 0},
 	}
 	w.WriteMsg(m)
 }
@@ -189,11 +169,11 @@ func handlerRoutingActiveNAckReq(w ResponseWriter, r Msg) {
 func handlerDiagMsgReq(w ResponseWriter, r Msg) {
 	rr := r.(*MsgDiagMsgReq)
 	m := &MsgDiagMsgRes{
-		id:         diagnosticMessagePositiveAcknowledge,
-		srcAddress: rr.dstAddress,
-		dstAddress: rr.srcAddress,
-		ackCode:    0,
-		userdata:   rr.userdata,
+		Id:         DiagnosticMessagePositiveAcknowledge,
+		SrcAddress: rr.DstAddress,
+		DstAddress: rr.SrcAddress,
+		AckCode:    0,
+		Userdata:   rr.Userdata,
 	}
 	w.WriteMsg(m)
 }
@@ -204,98 +184,86 @@ type UDSMsg struct {
 	data []byte
 }
 
-// Simple UDSSrvTest, only dedicated service for only one user
-type UDSSrvTest struct {
+// Simple NotifyChanImpl, only dedicated service for only one user
+type NotifyChanImpl struct {
 	mux     sync.RWMutex
 	isRun   chan struct{}
-	inChan  map[string]chan *UDSMsg
 	outChan map[string]chan *MsgDiagMsgInd
-	log     *log.Logger
+	log     Logger
 }
 
-func NewDoIPTest(loge io.Writer) *UDSSrvTest {
-	c := &UDSSrvTest{
+func NewNotifyChan(logger Logger) *NotifyChanImpl {
+	c := &NotifyChanImpl{
 		isRun:   make(chan struct{}),
-		inChan:  make(map[string]chan *UDSMsg),
 		outChan: make(map[string]chan *MsgDiagMsgInd),
-		log:     log.New(loge, "UDSSrvTest: ", log.Llongfile|log.Lmicroseconds),
+		log:     logger,
 	}
 	c.Start()
 	return c
 }
 
-func (srv *UDSSrvTest) Start() {
-	srv.log.Printf("Start UDSSrvTest")
+func (srv *NotifyChanImpl) Start() {
+	srv.log.Debugf("Start NotifyChanImpl")
 }
 
-func (srv *UDSSrvTest) Close() {
-	srv.log.Printf("Stop UDSSrvTest")
+func (srv *NotifyChanImpl) Close() {
+	srv.log.Debugf("Stop NotifyChanImpl")
 	close(srv.isRun)
 }
 
-func (srv *UDSSrvTest) process(inChan <-chan *UDSMsg, outChan chan<- *MsgDiagMsgInd) {
-	for m := range inChan {
-		sent := &MsgDiagMsgInd{
-			id:         diagnosticMessage,
-			srcAddress: m.src,
-			dstAddress: m.dst,
-			userdata:   m.data,
-		}
-		outChan <- sent
-	}
-}
-
-func (srv *UDSSrvTest) genOutChan(ctx context.Context, a net.Addr) <-chan *MsgDiagMsgInd {
+func (srv *NotifyChanImpl) MakeARcvChan(ctx context.Context, a net.Addr) <-chan *MsgDiagMsgInd {
 	srv.mux.Lock()
 
 	if srv.outChan[a.String()] != nil {
 		srv.mux.Unlock()
-		srv.log.Printf("(%v) Existed instance in UDSSrv, Perhaps terminating previous instance ongoing", a.String())
+		srv.log.Debugf("(%v) Existed instance in UDSSrv, Perhaps terminating previous instance ongoing", a.String())
 		return nil
 	}
 
-	inChan := make(chan *UDSMsg, 1)
-	outChan := make(chan *MsgDiagMsgInd, 1)
-	srv.inChan[a.String()] = inChan
-	srv.outChan[a.String()] = outChan
+	ch := make(chan *MsgDiagMsgInd, 1)
+	srv.outChan[a.String()] = ch
 	srv.mux.Unlock()
 
-	go srv.process(inChan, outChan)
 	go func() {
-		srv.log.Printf("(%v) genOutChan...", a.String())
+		srv.log.Debugf("(%v) GenOutChan...", a.String())
 		defer func() {
-			close(inChan)
-			close(outChan)
+			close(ch)
 
 			srv.mux.Lock()
-			delete(srv.inChan, a.String())
 			delete(srv.outChan, a.String())
 			srv.mux.Unlock()
 		}()
 
 		select {
 		case <-srv.isRun:
-			srv.log.Printf("(%v) Close srv..\n", a.String())
+			srv.log.Debugf("(%v) Close srv..\n", a.String())
 		case <-ctx.Done():
-			srv.log.Printf("(%v) Ctx rcv cancel event, exit...\n", a.String())
+			srv.log.Debugf("(%v) Ctx rcv cancel event, exit...\n", a.String())
 		}
 	}()
-	return outChan
+
+	return ch
 }
 
-func (srv *UDSSrvTest) feedin(addr string, src uint16, dst uint16, data []byte) {
+func (srv *NotifyChanImpl) Send(addr string, src uint16, dst uint16, data []byte) {
 	m := &UDSMsg{
 		src:  src,
 		dst:  dst,
 		data: data,
 	}
-	srv.log.Printf("(%v) Feed in data\n", addr)
+	srv.log.Debugf("(%v) Feed in data\n", addr)
 
 	srv.mux.RLock()
-	inChan := srv.inChan[addr]
+	outChan := srv.outChan[addr]
 	srv.mux.RUnlock()
 
-	inChan <- m
+	sent := &MsgDiagMsgInd{
+		Id:         DiagnosticMessage,
+		SrcAddress: m.src,
+		DstAddress: m.dst,
+		Userdata:   m.data,
+	}
+	outChan <- sent
 }
 
 var (
