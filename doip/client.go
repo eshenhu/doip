@@ -16,8 +16,8 @@ const (
 	interval      = 100 * time.Millisecond
 )
 
-// DoIP struct : internal represation on L3
-type DoIP struct {
+// Client struct : internal represation on L3
+type Client struct {
 	log         Logger
 	source      uint16
 	server      string
@@ -87,8 +87,8 @@ func (d doIPError) IsDisconnected() bool {
 // Initiates the inputLoop routine to receive messages from the socket and
 // the periodicTesterPresent routine for periodic requests to indicate that the client is still connected
 // Returns the doip object and any error encountered.
-func NewDoIP(logger Logger, sourceAddress uint16, server string) *DoIP {
-	d := &DoIP{
+func NewDoIP(logger Logger, sourceAddress uint16, server string) *Client {
+	d := &Client{
 		source:      sourceAddress,
 		readTimeout: readTimeout,
 		server:      server,
@@ -99,14 +99,14 @@ func NewDoIP(logger Logger, sourceAddress uint16, server string) *DoIP {
 }
 
 // SetReadTimeout set a custom read timeout
-func (d *DoIP) SetReadTimeout(timeout time.Duration) {
+func (d *Client) SetReadTimeout(timeout time.Duration) {
 	d.readTimeout = timeout
 }
 
 // Connect : connect to the server and prepare to send/receive
 // Initiates the inputLoop routine to receive messages from the socket and
 // the periodicTesterPresent routine for periodic requests to indicate that the client is still connected
-func (d *DoIP) Connect() (err error) {
+func (d *Client) Connect() (err error) {
 	conn, err := net.DialTimeout("tcp", d.server, 10*time.Second)
 	if err != nil {
 		d.log.Debug("Dial failed")
@@ -135,7 +135,7 @@ func (d *DoIP) Connect() (err error) {
 }
 
 // Disconnect : closes the connection to the server
-func (d *DoIP) Disconnect() {
+func (d *Client) Disconnect() {
 	d.log.Debugf("Disconnect... ")
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
@@ -152,7 +152,7 @@ func (d *DoIP) Disconnect() {
 }
 
 // Exchange : sync way to send and rcv roundtrip message to the DoIP entity.
-func (d *DoIP) Exchange(targetAddr uint16, writeData []byte) (readData []byte, err error) {
+func (d *Client) Exchange(targetAddr uint16, writeData []byte) (readData []byte, err error) {
 	if err := d.SendRaw(targetAddr, DiagnosticMessage, writeData); err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func (d *DoIP) Exchange(targetAddr uint16, writeData []byte) (readData []byte, e
 }
 
 //SendMsg Message
-func (d *DoIP) SendMsg(m MsgReq) error {
+func (d *Client) SendMsg(m MsgReq) error {
 	data := m.Pack()
 	ll := len(data)
 
@@ -191,12 +191,12 @@ func (d *DoIP) SendMsg(m MsgReq) error {
 }
 
 // Send :
-func (d *DoIP) Send(TargetAddress uint16, data []byte) error {
+func (d *Client) Send(TargetAddress uint16, data []byte) error {
 	return d.SendRaw(TargetAddress, DiagnosticMessage, data)
 }
 
 // SendRaw : Send only method
-func (d *DoIP) SendRaw(TargetAddress uint16, payloadType MsgTid, data []byte) error {
+func (d *Client) SendRaw(TargetAddress uint16, payloadType MsgTid, data []byte) error {
 	var size int
 	switch payloadType {
 	case AliveCheckRequest:
@@ -240,7 +240,7 @@ func (d *DoIP) SendRaw(TargetAddress uint16, payloadType MsgTid, data []byte) er
 }
 
 // Receive : get messages received. Set an error if a timeout or an error message has been received
-func (d *DoIP) Receive() (source uint16, target uint16, data []byte, err error) {
+func (d *Client) Receive() (source uint16, target uint16, data []byte, err error) {
 	var ok bool
 	select {
 	case message, ok := <-d.inChan:
@@ -269,7 +269,7 @@ func (d *DoIP) Receive() (source uint16, target uint16, data []byte, err error) 
 // aliveCheckPeriodical : broadcasts the message to the server, every 1 second,
 // to indicate that the client is still connected and that the diagnostic services are to remain active
 // 7.1.7
-func (d *DoIP) aliveCheckPeriodical() {
+func (d *Client) aliveCheckPeriodical() {
 	d.log.Debugf("Starting alive routine (%s)\n", d.connection.LocalAddr().String())
 	defer d.log.Debugf("Stopping alive routine (%s)\n", d.connection.LocalAddr().String())
 	for {
@@ -287,7 +287,7 @@ func (d *DoIP) aliveCheckPeriodical() {
 }
 
 // See Table 22
-func (d *DoIP) activationHandshake() (err error) {
+func (d *Client) activationHandshake() (err error) {
 	err = d.SendRaw(d.source, RoutingActivationRequest, []byte{0x00, 0x00, 0x00, 0x00, 0x00})
 	if err != nil {
 		return
@@ -304,7 +304,7 @@ func (d *DoIP) activationHandshake() (err error) {
 	return
 }
 
-func (d *DoIP) isStopped() bool {
+func (d *Client) isStopped() bool {
 	select {
 	case _, ok := <-d.running:
 		return !ok
@@ -317,7 +317,7 @@ func (d *DoIP) isStopped() bool {
 // First, reads the header and extracts the package size
 // Reads the package payload according to the size
 // Drops message / sets errors as specified in the ISO or sends the message up
-func (d *DoIP) inputLoop(connection net.Conn) {
+func (d *Client) inputLoop(connection net.Conn) {
 	defer close(d.inChan)
 	defer close(d.errChan)
 

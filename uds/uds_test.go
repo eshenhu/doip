@@ -50,16 +50,27 @@ func HandlerDiagMsgReq(w doip.ResponseWriter, r doip.Msg) {
 	}
 	w.WriteMsg(m)
 }
+
+func HandleAliveCheckReq(w doip.ResponseWriter, r doip.Msg) {
+	_ = r.(*doip.MsgAliveChkReq)
+	m := &doip.MsgAliveChkRes{
+		Id:         doip.AliveCheckResponse,
+		SrcAddress: 0,
+	}
+	w.WriteMsg(m)
+}
+
 func TestDoIPUDS(t *testing.T) {
 	//log := ioutil.Discard
 	log := NewLogger()
 
-	c := uds.NewNotifyHdl(log)
+	hnd := &doip.MsgHandler{
+		HndRoutingActivationReqFunc: HandlerRoutingActiveReq,
+		HndDiagnosticMessageFunc:    HandlerDiagMsgReq,
+		HndAliveCheckRequestFunc:    HandleAliveCheckReq,
+	}
 
-	mux := doip.NewServeMuxWithNotifyChan(c)
-	mux.HandleFunc(doip.RoutingActivationRequest, HandlerRoutingActiveReq)
-
-	s, _, err := doip.RunLocalTCPServer("127.0.0.1:0", mux, log)
+	s, _, err := doip.RunLocalTCPServer("127.0.0.1:0", hnd, log)
 	if err != nil {
 		t.Fatalf("TestServer: Could not start DoIP server " + err.Error())
 		return
@@ -70,7 +81,7 @@ func TestDoIPUDS(t *testing.T) {
 	addr := s.Listener.Addr().(*net.TCPAddr)
 	doIP := doip.NewDoIP(log, 0x0E80, fmt.Sprintf("127.0.0.1:%d", addr.Port))
 
-	doIP.SetReadTimeout(30 * time.Millisecond)
+	doIP.SetReadTimeout(1000 * time.Millisecond)
 	err = doIP.Connect()
 	if err != nil {
 		t.Fatalf("SIM: Could not create DoIP session " + err.Error())
@@ -80,7 +91,7 @@ func TestDoIPUDS(t *testing.T) {
 
 	udsDoIP := uds.NewUDSWithPendingCount(log, doIP, 1)
 
-	mux.HandleFunc(doip.DiagnosticMessage, func(w doip.ResponseWriter, r doip.Msg) {
+	hnd.HndDiagnosticMessageFunc = func(w doip.ResponseWriter, r doip.Msg) {
 		rr := r.(*doip.MsgDiagMsgReq)
 		rr.Userdata = append(rr.Userdata, 0x00, 0x21, 0x07)
 		rr.Userdata[0] = 0x62
@@ -93,12 +104,13 @@ func TestDoIPUDS(t *testing.T) {
 			Userdata:   rr.Userdata,
 		}
 		w.WriteMsg(m)
-	})
+	}
+
 	t.Run("DoIpShortDid", func(t *testing.T) {
 		testDoIPShortDid(t, udsDoIP)
 	})
 
-	mux.HandleFunc(doip.DiagnosticMessage, func(w doip.ResponseWriter, r doip.Msg) {
+	hnd.HndDiagnosticMessageFunc = func(w doip.ResponseWriter, r doip.Msg) {
 		rr := r.(*doip.MsgDiagMsgReq)
 		rr.Userdata = append(rr.Userdata, arrayForTest...)
 		rr.Userdata[0] = 0x62
@@ -111,7 +123,7 @@ func TestDoIPUDS(t *testing.T) {
 			Userdata:   rr.Userdata,
 		}
 		w.WriteMsg(m)
-	})
+	}
 	t.Run("DoIpLongDid", func(t *testing.T) {
 		testDoIPLongDid(t, udsDoIP)
 	})
@@ -121,11 +133,13 @@ func TestDoIPUDSWithMultiClient(t *testing.T) {
 	//log := ioutil.Discard
 	log := NewLogger()
 
-	c := uds.NewNotifyHdl(log)
+	hnd := &doip.MsgHandler{
+		HndRoutingActivationReqFunc: HandlerRoutingActiveReq,
+		HndDiagnosticMessageFunc:    HandlerDiagMsgReq,
+		HndAliveCheckRequestFunc:    HandleAliveCheckReq,
+	}
 
-	mux := doip.NewServeMuxWithNotifyChan(c)
-	mux.HandleFunc(doip.RoutingActivationRequest, HandlerRoutingActiveReq)
-	mux.HandleFunc(doip.DiagnosticMessage, func(w doip.ResponseWriter, r doip.Msg) {
+	hnd.HndDiagnosticMessageFunc = func(w doip.ResponseWriter, r doip.Msg) {
 		rr := r.(*doip.MsgDiagMsgReq)
 		rr.Userdata = append(rr.Userdata, 0x00, 0x21, 0x07)
 		rr.Userdata[0] = 0x62
@@ -138,9 +152,9 @@ func TestDoIPUDSWithMultiClient(t *testing.T) {
 			Userdata:   rr.Userdata,
 		}
 		w.WriteMsg(m)
-	})
+	}
 
-	s, _, err := doip.RunLocalTCPServer("127.0.0.1:0", mux, log)
+	s, _, err := doip.RunLocalTCPServer("127.0.0.1:0", hnd, log)
 	if err != nil {
 		t.Fatalf("TestServer: Could not start DoIP server " + err.Error())
 		return
@@ -151,7 +165,7 @@ func TestDoIPUDSWithMultiClient(t *testing.T) {
 
 	runWithTest := func() {
 		doIP := doip.NewDoIP(log, 0x0E80, fmt.Sprintf("127.0.0.1:%d", addr.Port))
-		doIP.SetReadTimeout(30 * time.Millisecond)
+		doIP.SetReadTimeout(1000 * time.Millisecond)
 		err0 := doIP.Connect()
 		if err0 != nil {
 			t.Fatalf("SIM: Could not create DoIP session " + err.Error())

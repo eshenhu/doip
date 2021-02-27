@@ -1,7 +1,7 @@
 package doip
 
 import (
-	"io/ioutil"
+	"io"
 	"log"
 )
 
@@ -14,9 +14,9 @@ type Logger interface {
 }
 
 // NewLogger creates a new logger instance.
-func NewLogger() Logger {
+func NewLogger(w io.Writer) Logger {
 	return &logger{
-		log0: log.New(ioutil.Discard, "INFO: ", log.Lshortfile),
+		log0: log.New(w, "INFO: ", log.Lshortfile),
 	}
 }
 

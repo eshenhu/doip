@@ -173,12 +173,12 @@ func (r *MsgAliveChkReq) Pack() []byte {
 
 //MsgAliveChkRes AliveCheck
 type MsgAliveChkRes struct {
-	id         MsgTid
-	srcAddress uint16
+	Id         MsgTid
+	SrcAddress uint16
 }
 
 //GetID returns id
-func (w *MsgAliveChkRes) GetID() MsgTid { return w.id }
+func (w *MsgAliveChkRes) GetID() MsgTid { return w.Id }
 
 //MsgDiagMsgReq DiagMsg
 type MsgDiagMsgReq struct {
@@ -221,6 +221,11 @@ type MsgDiagMsgInd struct {
 	SrcAddress uint16
 	DstAddress uint16
 	Userdata   []byte
+}
+
+type MsgDiagMsgIndDst struct {
+	Addr string
+	MsgDiagMsgInd
 }
 
 // GetID returns id

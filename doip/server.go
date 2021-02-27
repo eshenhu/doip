@@ -24,14 +24,16 @@ var (
 	errMsgSecurity         = errors.New("RoutingActivation Failed")
 )
 
+/*
 // UDSHandler is implemented by any value that implements Handler and NewIndChan()
 type UDSHandler interface {
 	Handler
-	NewIndChan(context.Context, net.Addr) <-chan *MsgDiagMsgInd
+	//NewIndChan(context.Context, net.Addr) <-chan *MsgDiagMsgInd
 }
+*/
 
 // Handler is implemented by any value that implements ServeDoIP.
-type Handler interface {
+type UDSHandler interface {
 	ServeDoIP(w ResponseWriter, r Msg)
 }
 
@@ -60,81 +62,25 @@ type response struct {
 	writer     Writer   // writer to output the raw byte
 }
 
-// ServeMux is an DoIP request multiplexer. It matches the
-// message type of each incoming request against a list of
-// registered patterns add calls the handler for the pattern
-// that most closely matches the message type.
-type ServeMux struct {
-	z  map[MsgTid]Handler
-	m  *sync.RWMutex
-	f  func(context.Context, net.Addr) <-chan *MsgDiagMsgInd
-	ff NotifyChan
-}
-
-//NotifyChan give the ability for the server to notify the client with async way.
-type NotifyChan interface {
-	Send(addr string, src uint16, dst uint16, data []byte)
-	MakeARcvChan(ctx context.Context, a net.Addr) <-chan *MsgDiagMsgInd
-}
-
-//NewServeMuxWithNotifyChan allocate a new ServerMux with async notify channel.
-func NewServeMuxWithNotifyChan(ch NotifyChan) *ServeMux {
-	return &ServeMux{
-		z:  make(map[MsgTid]Handler),
-		m:  new(sync.RWMutex),
-		ff: ch,
-	}
-}
-
-// The HandlerFunc type is an adapter to allow the use of
-// ordinary functions as DoIP handlers.  If f is a function
-// with the appropriate signature, HandlerFunc(f) is a
-// Handler object that calls f.
-type HandlerFunc func(ResponseWriter, Msg)
-
-func (mux *ServeMux) match(t MsgTid) Handler {
-	mux.m.RLock()
-	defer mux.m.RUnlock()
-	// Wildcard match, if we have found nothing try the root zone as a last resort.
-	if h, ok := mux.z[t]; ok {
-		return h
-	}
-	return nil
-}
-
-// NewIndChan return a indication channel to the ServerMux
-func (mux *ServeMux) NewIndChan(ctx context.Context, a net.Addr) <-chan *MsgDiagMsgInd {
-	return mux.ff.MakeARcvChan(ctx, a)
-}
-
-// Handle adds a handler to the ServeMux for pattern.
-func (mux *ServeMux) Handle(id MsgTid, handler Handler) {
-	mux.m.Lock()
-	mux.z[id] = handler
-	mux.m.Unlock()
-}
-
-// HandleFunc adds a handler function to the ServeMux for pattern.
-func (mux *ServeMux) HandleFunc(id MsgTid, handler func(ResponseWriter, Msg)) {
-	mux.Handle(id, HandlerFunc(handler))
-}
-
-// HandleRemove deregist the handler specific for pattern from the ServeMux.
-func (mux *ServeMux) HandleRemove(id MsgTid) {
-	mux.m.Lock()
-	delete(mux.z, id)
-	mux.m.Unlock()
+type MsgHandler struct {
+	HndRoutingActivationReqFunc func(w ResponseWriter, r Msg)
+	HndAliveCheckRequestFunc    func(w ResponseWriter, r Msg)
+	HndDiagnosticMessageFunc    func(w ResponseWriter, r Msg)
 }
 
 // ServeDoIP : dispatches the request to the handler whose
 // pattern most closely matches the request message.
-func (mux *ServeMux) ServeDoIP(w ResponseWriter, req Msg) {
-	var h Handler
-	if h = mux.match(req.GetID()); h == nil {
+func (hnd *MsgHandler) ServeDoIP(w ResponseWriter, req Msg) {
+	switch req.GetID() {
+	case RoutingActivationRequest:
+		hnd.HndRoutingActivationReqFunc(w, req)
+	case AliveCheckRequest:
+		hnd.HndAliveCheckRequestFunc(w, req)
+	case DiagnosticMessage:
+		hnd.HndDiagnosticMessageFunc(w, req)
+	default:
 		failedHandler(w, DoIPHdrErrUnknownPayloadType)
-		return
 	}
-	h.ServeDoIP(w, req)
 }
 
 // Writer writes raw DNS messages; each call to Write should send an entire message.
@@ -170,47 +116,6 @@ func (dw *defaultWriter) Write(p []byte) (n int, err error) {
 	return dw.w.Write(p)
 }
 
-// ServeDoIP calls f(w, r).
-func (f HandlerFunc) ServeDoIP(w ResponseWriter, r Msg) {
-	f(w, r)
-}
-
-// ListenAndServe Starts a server on address and network specified Invoke handler
-// for incoming queries.
-func ListenAndServe(addr string, network string, handler UDSHandler, logger Logger) error {
-	server := &Server{
-		Addr:    addr,
-		Net:     network,
-		Handler: handler,
-	}
-
-	server.log = logger
-	return server.ListenAndServe()
-}
-
-// ListenAndServeTLS acts like http.ListenAndServeTLS, more information in
-// http://golang.org/pkg/net/http/#ListenAndServeTLS
-func ListenAndServeTLS(addr, certFile, keyFile string, handler UDSHandler, logger Logger) error {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return err
-	}
-
-	config := tls.Config{
-		Certificates: []tls.Certificate{cert},
-	}
-
-	server := &Server{
-		Addr:      addr,
-		Net:       "tcp-tls",
-		TLSConfig: &config,
-		Handler:   handler,
-	}
-
-	server.log = logger
-	return server.ListenAndServe()
-}
-
 // A Server defines parameters for running an DoIP server.
 type Server struct {
 	// Address to listen on, ":domain" if empty.
@@ -238,6 +143,8 @@ type Server struct {
 	lock sync.RWMutex
 	// Tracking on the living connections
 	activeConn map[*net.Conn]userInfo
+	//
+	router *Router
 	// Logging
 	log Logger
 }
@@ -350,6 +257,12 @@ func (srv *Server) Shutdown() error {
 	return nil
 }
 
+// IndChan return unidirection channel to the user for sending indication 
+// message to the server.
+func (srv *Server) IndChan() chan<- *MsgDiagMsgIndDst {
+	return srv.router.ch
+}
+
 // getReadTimeout is a helper func to use system timeout if server did not intend to change it.
 func (srv *Server) getReadTimeout() time.Duration {
 	rtimeout := doIPTimeout
@@ -386,8 +299,14 @@ func (srv *Server) serveTCP(l net.Listener) error {
 		}
 		//Setup a new context
 		srv.log.Debugf("New connection on %s", rw.RemoteAddr().String())
+		c, cancel, err := srv.router.Add(rw.RemoteAddr().String())
+		if err != nil {
+			srv.log.Debugf("Failed to add new into router with %s", err)
+			continue
+		}
+
 		wg.Add(1)
-		go srv.serve(&wg, handler, rw.RemoteAddr(), rw) // Should I attach the parameters with context?
+		go srv.serve(&wg, handler, rw, c, cancel)
 	}
 	srv.closeConnects()
 	wg.Wait()
@@ -397,28 +316,27 @@ func (srv *Server) serveTCP(l net.Listener) error {
 // Serve two input source
 // 	i)  IndChan() <-chan comes from the UDS layer
 //	ii) net.Conn comes from network
-func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Conn) {
-	defer wg.Done()
+func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, t net.Conn, ch <-chan *MsgDiagMsgInd, cancel2 func()) {
+	defer func() {
+		wg.Done()
+		cancel2()
+	}()
 
 	srv.trackConn(&t, true)
 	defer srv.trackConn(&t, false)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &response{tcp: t, remoteAddr: a}
+	w := &response{tcp: t, remoteAddr: t.RemoteAddr()}
 	wr := &defaultWriter{s: srv, w: w, c: &t}
 	w.writer = wr
 	// new goroutine was created for receiving indication from UpperLayer (f.g UDS)
 	errInd := make(chan error, 1)
 	go func() {
-		srv.log.Debugf("Server new goroutine (%s)\n", w.RemoteAddr().String())
-		c := h.NewIndChan(ctx, a)
-		if c == nil {
-			return
-		}
+		srv.log.Debugf("Server new goroutine for recv indication (%s)\n", w.RemoteAddr().String())
 	LL:
 		for {
 			select {
-			case m, ok := <-c:
+			case m, ok := <-ch:
 				// Closed
 				if !ok {
 					srv.log.Debugf("UDS IndChan closed (%s), exiting...", w.RemoteAddr().String())
@@ -427,13 +345,10 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 				}
 				err := w.WriteMsg(m)
 				if err != nil {
-					cancel()
-					<-c //wait to return for the server side to clean the resource
 					errInd <- err
 					break LL
 				}
 			case <-ctx.Done():
-				<-c //wait to return
 				errInd <- ctx.Err()
 				break LL
 			}
@@ -475,9 +390,9 @@ func (srv *Server) serve(wg *sync.WaitGroup, h UDSHandler, a net.Addr, t net.Con
 	*/
 Exit:
 	if err != nil {
-		srv.log.Debugf("Exit server with %s\n", a.String())
+		srv.log.Debugf("Exit server with %s\n", t.RemoteAddr().String())
 	} else {
-		srv.log.Debugf("Exit server peacefully with %s", a.String())
+		srv.log.Debugf("Exit server peacefully with %s", t.RemoteAddr().String())
 	}
 	// close the net.Conn
 	w.Close()
@@ -641,10 +556,14 @@ func failedHandler(w ResponseWriter, err byte) {
 
 //RunLocalTCPServer give a method to start and run a server.
 func RunLocalTCPServer(addr string, handler UDSHandler, logger Logger) (*Server, string, error) {
+	r := NewRouter(logger)
+	defer r.Close()
+
 	server := &Server{
 		Addr:    addr,
 		Net:     "tcp",
 		Handler: handler,
+		router: r,
 		log:     logger,
 	}
 
@@ -669,11 +588,15 @@ func RunLocalTLSServer(addr string, handler UDSHandler, cert tls.Certificate, lo
 		Certificates: []tls.Certificate{cert},
 	}
 
+	r := NewRouter(logger)
+	defer r.Close()
+
 	server := &Server{
 		Addr:      addr,
 		Net:       "tcp-tls",
 		TLSConfig: &config,
 		Handler:   handler,
+		router:    r,
 		log:       logger,
 	}
 

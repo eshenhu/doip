@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"testing"
 	"time"
+	"sync"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -32,13 +33,13 @@ type DoIPServer struct {
 }
 
 func TestShutdownSrvDuringOngoingActiveClient(t *testing.T) {
-	c := NewNotifyChan(loge)
-	defer c.Close()
+	hnd := &MsgHandler{
+		HndRoutingActivationReqFunc: handlerRoutingActiveReq,
+		HndDiagnosticMessageFunc: handlerDiagMsgReq,
+		HndAliveCheckRequestFunc: handleAliveCheckReq,
+	}
 
-	mux := NewServeMuxWithNotifyChan(c)
-	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
-
-	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", hnd, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
@@ -60,45 +61,20 @@ func TestShutdownSrvDuringOngoingActiveClient(t *testing.T) {
 	doIP.Disconnect()
 }
 
-func TestDisconnectScenarios(t *testing.T) {
-	c := NewNotifyChan(loge)
-	defer c.Close()
+func TestNormalRAReq(t *testing.T) {
+	hnd := &MsgHandler{
+		HndRoutingActivationReqFunc: handlerRoutingActiveReq,
+		HndDiagnosticMessageFunc: handlerDiagMsgReq,
+		HndAliveCheckRequestFunc: handleAliveCheckReq,
+	}
 
-	mux := NewServeMuxWithNotifyChan(c)
-	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
-	mux.HandleFunc(DiagnosticMessage, handlerDiagMsgReq)
-
-	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", hnd, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
 	defer srv.Shutdown()
 	port = srv.Listener.Addr().(*net.TCPAddr).Port
 
-	time.Sleep(1000 * time.Millisecond)
-	t.Run("testNoRegSrvType", testNoRegSrvType)
-	t.Run("testNormalRAReq", testNormalRAReq)
-	t.Run("testAbnormalRoutingActReq", testAbnormalRoutingActReq)
-	t.Run("testDiagMessageReq", testDiagMessageReq)
-	//t.Run("testCheckGoroutineResource", testCheckGoroutineResource)
-}
-
-func testNoRegSrvType(t *testing.T) {
-	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", port))
-	defer doIP.Disconnect()
-
-	doIP.SetReadTimeout(200 * time.Millisecond)
-	doIP.Connect()
-
-	err := doIP.SendRaw(0, AliveCheckRequest, []byte{})
-	assert.NoError(t, err)
-
-	_, _, _, err = doIP.Receive()
-	assert.Error(t, err)
-	assert.EqualError(t, err, "#13 <DoIP: Unknown payload type>")
-}
-
-func testNormalRAReq(t *testing.T) {
 	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", port))
 	defer doIP.Disconnect()
 
@@ -114,14 +90,27 @@ func testNormalRAReq(t *testing.T) {
 		ReserveForOEM:  []byte{},
 	}
 
-	err := doIP.SendMsg(req)
+	err = doIP.SendMsg(req)
 	assert.NoError(t, err)
 
 	_, _, _, err = doIP.Receive()
 	assert.NoError(t, err)
 }
 
-func testAbnormalRoutingActReq(t *testing.T) {
+func TestAbnormalRoutingActReq(t *testing.T) {
+	hnd := &MsgHandler{
+		HndRoutingActivationReqFunc: handlerRoutingActiveReq,
+		HndDiagnosticMessageFunc: handlerDiagMsgReq,
+		HndAliveCheckRequestFunc: handleAliveCheckReq,
+	}
+
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", hnd, loge)
+	if err != nil {
+		t.Fatalf("Error while starting the server %s", err)
+	}
+	defer srv.Shutdown()
+	port = srv.Listener.Addr().(*net.TCPAddr).Port
+
 	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", port))
 	defer doIP.Disconnect()
 
@@ -129,7 +118,7 @@ func testAbnormalRoutingActReq(t *testing.T) {
 	doIP.Connect()
 
 	// bad format on payload
-	err := doIP.SendRaw(0x1D01, RoutingActivationRequest, []byte{0})
+	err = doIP.SendRaw(0x1D01, RoutingActivationRequest, []byte{0})
 	assert.NoError(t, err)
 
 	_, _, _, err = doIP.Receive()
@@ -146,7 +135,7 @@ func testCheckGoroutineResource(t *testing.T) {
 	numOfGoroutines := runtime.NumGoroutine()
 	//t.Logf("number of goroutines (in entry) are %v\n", runtime.NumGoroutine())
 	const n int = 10
-	var clients [n]*DoIP
+	var clients [n]*Client
 
 	//Stage 1
 	for i := 0; i < n; i++ {
@@ -186,7 +175,20 @@ func testCheckGoroutineResource(t *testing.T) {
 	assert.LessOrEqual(t, runtime.NumGoroutine(), numOfGoroutines)
 }
 
-func testDiagMessageReq(t *testing.T) {
+func TestDiagMessageReq(t *testing.T) {
+	hnd := &MsgHandler{
+		HndRoutingActivationReqFunc: handlerRoutingActiveReq,
+		HndDiagnosticMessageFunc: handlerDiagMsgReq,
+		HndAliveCheckRequestFunc: handleAliveCheckReq,
+	}
+
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", hnd, loge)
+	if err != nil {
+		t.Fatalf("Error while starting the server %s", err)
+	}
+	defer srv.Shutdown()
+	port = srv.Listener.Addr().(*net.TCPAddr).Port
+
 	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", port))
 	defer doIP.Disconnect()
 	doIP.Connect()
@@ -194,7 +196,7 @@ func testDiagMessageReq(t *testing.T) {
 	token := make([]byte, 1200*10)
 	rand.Read(token)
 	// bad format on payload
-	err := doIP.SendRaw(0x1D01, DiagnosticMessage, token)
+	err = doIP.SendRaw(0x1D01, DiagnosticMessage, token)
 	assert.NoError(t, err)
 
 	_, _, tokenR, err := doIP.Receive()
@@ -203,14 +205,13 @@ func testDiagMessageReq(t *testing.T) {
 }
 
 func TestNormalDiagMessageReq(t *testing.T) {
-	c := NewNotifyChan(loge)
-	defer c.Close()
+	hnd := &MsgHandler{
+		HndRoutingActivationReqFunc: handlerRoutingActiveReq,
+		HndDiagnosticMessageFunc: handlerDiagMsgReq,
+		HndAliveCheckRequestFunc: handleAliveCheckReq,
+	}
 
-	mux := NewServeMuxWithNotifyChan(c)
-	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
-	mux.HandleFunc(DiagnosticMessage, handlerDiagMsgReq)
-
-	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", hnd, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
@@ -225,28 +226,105 @@ func TestNormalDiagMessageReq(t *testing.T) {
 	token := make([]byte, 12)
 	rand.Read(token)
 
-	var tokenR []byte
 	// bad format on payload
 	err = doIP.SendRaw(0x1D01, DiagnosticMessage, token)
 	assert.NoError(t, err)
 
-	_, _, tokenR, err = doIP.Receive()
+	_, _, tokenR1, err := doIP.Receive()
 	assert.NoError(t, err)
-	assert.Equal(t, tokenR, token)
+	assert.Equal(t, tokenR1, token)
 
-	tokenR, err = doIP.Exchange(0x1D01, token)
+	tokenR2, err := doIP.Exchange(0x1D01, token)
 	assert.NoError(t, err)
-	assert.Equal(t, tokenR, token)
+	assert.Equal(t, tokenR2, token)
+}
+
+
+func TestNormalDiagMessageReqWithMoreClient(t *testing.T) {
+	hnd := &MsgHandler{
+		HndRoutingActivationReqFunc: handlerRoutingActiveReq,
+		HndDiagnosticMessageFunc: handlerDiagMsgReq,
+		HndAliveCheckRequestFunc: handleAliveCheckReq,
+	}
+
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", hnd, loge)
+	if err != nil {
+		t.Fatalf("Error while starting the server %s", err)
+	}
+	defer srv.Shutdown()
+	time.Sleep(1000 * time.Millisecond)
+
+	addr := srv.Listener.Addr().(*net.TCPAddr)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int){
+			defer wg.Done()
+
+			var srcAddr uint16 = 0x0E80
+			srcAddr += 1
+
+			doIP := NewDoIP(loge, srcAddr, fmt.Sprintf("127.0.0.1:%d", addr.Port))
+			doIP.Connect()
+			defer doIP.Disconnect()
+
+			token := make([]byte, 12)
+			rand.Read(token)
+
+			// bad format on payload
+			err := doIP.SendRaw(0x1D01, DiagnosticMessage, token)
+			assert.NoError(t, err)
+
+			_, _, tokenR1, err := doIP.Receive()
+			assert.NoError(t, err)
+			assert.Equal(t, tokenR1, token)
+
+			tokenR2, err := doIP.Exchange(0x1D01, token)
+			assert.NoError(t, err)
+			assert.Equal(t, tokenR2, token)		
+
+			sndChan := srv.IndChan()
+			addr := doIP.connection.LocalAddr().String()
+			sndChan <- &MsgDiagMsgIndDst{
+				Addr : addr,
+				MsgDiagMsgInd : MsgDiagMsgInd{
+					Id: DiagnosticMessage,
+					SrcAddress: 0x1D01,
+					DstAddress: srcAddr,
+					Userdata: token,
+				},
+			}
+			_, _, tokenR3, err := doIP.Receive()
+			assert.NoError(t, err)
+			assert.Equal(t, tokenR3, token)
+
+			addr = doIP.connection.LocalAddr().String()
+			sndChan <- &MsgDiagMsgIndDst{
+				Addr : addr,
+				MsgDiagMsgInd : MsgDiagMsgInd{
+					Id: DiagnosticMessage,
+					SrcAddress: 0x1D01,
+					DstAddress: srcAddr,
+					Userdata: token,
+				},
+			}
+			_, _, tokenR4, err := doIP.Receive()
+			assert.NoError(t, err)
+			assert.Equal(t, tokenR4, token)
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestAbnormalDiagMessageReq(t *testing.T) {
-	c := NewNotifyChan(loge)
-	defer c.Close()
+	hnd := &MsgHandler{
+		HndRoutingActivationReqFunc: handlerRoutingActiveNAckReq,
+		HndDiagnosticMessageFunc: handlerDiagMsgReq,
+		HndAliveCheckRequestFunc: handleAliveCheckReq,
+	}
 
-	mux := NewServeMuxWithNotifyChan(c)
-	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveNAckReq)
-
-	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", hnd, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
@@ -262,22 +340,23 @@ func TestAbnormalDiagMessageReq(t *testing.T) {
 }
 
 func TestNormalDiagMessageInd(t *testing.T) {
-	c := NewNotifyChan(loge)
-	defer c.Close()
+	hnd := &MsgHandler{
+		HndRoutingActivationReqFunc: handlerRoutingActiveReq,
+		HndDiagnosticMessageFunc: handlerDiagMsgReq,
+		HndAliveCheckRequestFunc: handleAliveCheckReq,
+	}
 
-	mux := NewServeMuxWithNotifyChan(c)
-	mux.HandleFunc(RoutingActivationRequest, handlerRoutingActiveReq)
-	mux.HandleFunc(DiagnosticMessage, handlerDiagMsgReq)
-
-	srv, _, err := RunLocalTCPServer("127.0.0.1:0", mux, loge)
+	srv, _, err := RunLocalTCPServer("127.0.0.1:0", hnd, loge)
 	if err != nil {
 		t.Fatalf("Error while starting the server %s", err)
 	}
 	defer srv.Shutdown()
-	time.Sleep(1000 * time.Millisecond)
+	time.Sleep(5000 * time.Millisecond)
 
-	addrTcp := srv.Listener.Addr().(*net.TCPAddr)
-	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", addrTcp.Port))
+	sndChan := srv.IndChan()
+	addrTCP := srv.Listener.Addr().(*net.TCPAddr)
+
+	doIP := NewDoIP(loge, 0x0E80, fmt.Sprintf("127.0.0.1:%d", addrTCP.Port))
 	doIP.Connect()
 	defer doIP.Disconnect()
 
@@ -290,21 +369,38 @@ func TestNormalDiagMessageInd(t *testing.T) {
 	assert.Equal(t, tokenR, token)
 
 	addr := doIP.connection.LocalAddr().String()
-	c.Send(addr, 0x1D01, 0x0E80, token)
+	sndChan <- &MsgDiagMsgIndDst{
+		Addr : addr,
+		MsgDiagMsgInd : MsgDiagMsgInd{
+			Id: DiagnosticMessage,
+			SrcAddress: 0x1D01,
+			DstAddress: 0x0E80,
+			Userdata: token,
+		},
+	}
 
 	_, _, tokenR, err = doIP.Receive()
+	t.Logf("recv here")
 	assert.NoError(t, err)
 	assert.Equal(t, tokenR, token)
 
-	// feed into a wrong address different with the external tools
-	c.Send(addr, 0x1D01, 0x0E81, token)
+	sndChan <- &MsgDiagMsgIndDst{
+		Addr : addr,
+		MsgDiagMsgInd : MsgDiagMsgInd{
+			Id: DiagnosticMessage,
+			SrcAddress: 0x1D01,
+			DstAddress: 0x0E81,
+			Userdata: token,
+		},
+	}
+	t.Logf("recv here 2")
 
 	_, _, tokenR, err = doIP.Receive()
 	assert.Error(t, err)
 	assert.EqualError(t, err, "#02 <DoIP: Unmatched src address>")
 }
 
-func runWithConnection(doIP *DoIP, f func(t *testing.T)) func(t *testing.T) {
+func runWithConnection(doIP *Client, f func(t *testing.T)) func(t *testing.T) {
 	return func(t *testing.T) {
 		err := doIP.Connect()
 		if err != nil {
